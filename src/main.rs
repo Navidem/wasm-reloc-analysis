@@ -5,12 +5,15 @@ use wasmparser::WasmDecoder;
 use petgraph::graphmap::DiGraphMap;
 use std::{env, io, fs, path};
 use std::io::Write;
+use std::collections::HashSet;
+use std::collections::BTreeSet;
+use std::iter::FromIterator;
 
 use parity_wasm::elements::{Deserialize, CodeSection, RelocSection, ExportSection, NameSection, 
 ModuleNameSection, FunctionNameSection, MemorySection, DataSection, RelocationEntry,
 Instruction, FuncBody, ImportEntry, Internal, Module, Section, Serialize, VarUint32, VarUint7};
 
-#[derive(Clone, Copy, PartialEq, Ord, Eq, PartialOrd, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Ord, Eq, PartialOrd, Hash, Debug, Default)]
 struct FuncEntry {
     id: u32,
     start: usize,
@@ -31,7 +34,7 @@ impl FuncEntry {
         self.start
     }
 }
-#[derive(Clone, Copy, PartialEq, Ord, PartialOrd, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Ord, PartialOrd, Eq, Hash, Debug, Default)]
 struct MemEntry {
     id: u32,
     offset: usize,
@@ -68,9 +71,15 @@ fn main() -> Result<(), Box<std::error::Error>>{
     let mut exported_func_ids: Vec<u32> = Vec::new();
     let mut exported_mem_indexes: Vec<u32> = Vec::new();
 
+    let mut func_table_entries: Vec<u32> = Vec::new();
+
     let mut code_start_addr: usize = 0;
     let mut data_start_addr: usize = 0;
     let mut data_body_met: usize = 0;
+
+    //let mut non_lazy_roots: Vec<Node> = Vec::new();
+    let mut non_lazy_roots: HashSet<Node> = HashSet::new();
+    let mut lazy_roots: HashSet<Node> = HashSet::new();
 
     let data = fs::read(path)?;
     let mut parser = wasmparser::Parser::new(&data);
@@ -98,7 +107,13 @@ fn main() -> Result<(), Box<std::error::Error>>{
                 else if *code == wasmparser::SectionCode::Table {
                     next_input = wasmparser::ParserInput::Default;
                 }
-                else { next_input = wasmparser::ParserInput::SkipSection;}
+                else if *code == wasmparser::SectionCode::Element {
+                    next_input = wasmparser::ParserInput::Default;
+                }
+                else { 
+                    println!("Skipping Section: {:?}", code);
+                    next_input = wasmparser::ParserInput::SkipSection;
+                    }
 
             },
             wasmparser::ParserState::BeginFunctionBody { range } /*|
@@ -121,15 +136,14 @@ fn main() -> Result<(), Box<std::error::Error>>{
             wasmparser::ParserState::EndInitExpressionBody{..}
             => {
                 //println!("{:#?}", state);
-                next_input = wasmparser::ParserInput::Default;
-            },
+                //next_input = wasmparser::ParserInput::Default;
+            }, 
             wasmparser::ParserState::BeginDataSectionEntryBody (size) => {
                 data_entry_list.push(
                     MemEntry{id: data_counter, offset: data_body_met, size: size}
                 );
                 data_counter += 1;
                 data_body_met += size as usize;
-                next_input = wasmparser::ParserInput::Default;
             },
             wasmparser::ParserState::ExportSectionEntry { field, kind, index} => {
                 //println!("{:?}\n{:#?}", String::from_utf8((*field).to_vec()).unwrap(), state);
@@ -138,14 +152,20 @@ fn main() -> Result<(), Box<std::error::Error>>{
                    wasmparser::ExternalKind::Memory => exported_mem_indexes.push(index),
                    _ => ()  //TODO: should I log Table and Global?
                 }
-                next_input = wasmparser::ParserInput::Default;
             },
             wasmparser::ParserState::TableSectionEntry (..) => {
                 println!("{:#?}",state );
-                next_input = wasmparser::ParserInput::Default;
             }
-            _ => {
+            wasmparser::ParserState::BeginElementSectionEntry(..) |
+            wasmparser::ParserState::EndElementSectionEntry => {
                 println!("{:#?}", state);
+            }
+            wasmparser::ParserState::ElementSectionEntryBody (ref elements) => {
+                func_table_entries = elements.clone();
+            }
+
+            _ => {
+                println!("failed on:\n{:#?}", state);
                 unreachable!()
                 }
         }
@@ -199,6 +219,32 @@ fn main() -> Result<(), Box<std::error::Error>>{
     let mut graph = DiGraphMap::new();
     let bodies = code_section.bodies();
     let func_name_map = func_name_section.names(); 
+    // println!("Dumping Table sectoion's Elements: {}", func_table_entries.len());
+    // for index in func_table_entries {
+    //     println!("Entry {}: {:#?}", index, func_name_map.get(index as u32).unwrap() );
+    // }
+
+    for entry in exported_func_ids {
+        non_lazy_roots.insert(
+            Node::Func(func_entry_list[entry as usize]) //SHOULD CLONE this??
+        );
+    }
+    for entry in exported_mem_indexes {
+        non_lazy_roots.insert(
+            Node::Mem(data_entry_list[entry as usize])
+        );
+    }
+    for entry in func_table_entries {
+        non_lazy_roots.insert(
+            Node::Func(func_entry_list[entry as usize])
+        );
+    }
+
+    //println!("non_lazy root: {}\n{:#?}", non_lazy_roots.len(), non_lazy_roots);
+    //TODO: fill in lazy_root via wasm custome section
+    non_lazy_roots.remove(&Node::Func(func_entry_list[5 as usize]));
+    lazy_roots.insert(Node::Func(func_entry_list[5 as usize]));
+    //////TODO: ^^^^^^^^
 
 /*     for (i, func) in (bodies).iter().enumerate(){
         //let locals = func.locals();
@@ -282,35 +328,61 @@ fn main() -> Result<(), Box<std::error::Error>>{
         } 
 
     }
-    
-    // println!("graph: {:#?}", graph);
-    let mut output = "digraph G {\n".to_string();
-    for nod in graph.nodes() {
-        let mut src_text: String;
-        match nod {
-            Node::Func(x) => src_text = format!("Func{}", x.id()),
-            Node:: Mem(x) => src_text = format!("Mem{}", x.id())
+
+    /// find all reachable nodes by non_lazy_roots, and build the list of nodes just reachable from lazy_roots
+    let mut non_lazy_reachable: HashSet<Node> = HashSet::new();
+    let mut non_lazy_nodes: Vec<Node> = non_lazy_roots.into_iter().collect();
+                                        //Vec::from_iter(non_lazy_roots.into_iter());
+    let mut visited: HashSet<Node> = HashSet::new();
+    let mut log = String::from("");
+    loop{
+        let node: Node;
+        match non_lazy_nodes.pop(){
+            None => break,
+            Some(x) => {
+                non_lazy_reachable.insert(x);
+                node = x;
+                visited.insert(x);
+            }
         }
-        for to in graph.neighbors_directed(nod, petgraph::Direction::Outgoing) {
-            match to {
-                Node::Func(y) => output += &format!("{} -> Func{};\n", src_text, y.id()),
-                Node::Mem(y) => output += &format!("{} -> Mem{};\n", src_text, y.id())
+        log += &format!("-> {:?} ", node);
+        for neighbor in graph.neighbors_directed(node, petgraph::Direction::Outgoing){
+            if !visited.contains(&neighbor){
+                non_lazy_nodes.push(neighbor);
             }
         }
     }
-    output += "}";
 
-    // println!("{}",output );
-    let dot_file = path::Path::new("./graph.dot");
-    let mut file = match fs::File::create(&dot_file) {
-        Err(oops) => panic! ("couldn't create dot file! {} {:?}", oops, dot_file),
-        Ok(fl) => fl,
-    };
-
-    match file.write_all(output.as_bytes()) {
-        Err(oops) => panic!("cannot write into file {}", oops),
-        Ok(_) => (),
+///////
+non_lazy_reachable.remove(&Node::Func(func_entry_list[5 as usize]));
+///////
+    let mut lazy_exclusive_reachable: HashSet<Node> = HashSet::new();
+    let mut lazy_nodes: Vec<Node> = lazy_roots.into_iter().collect();
+    visited.clear();
+    loop {
+        let node: Node;
+        match lazy_nodes.pop() {
+            None => break,
+            Some(x) => {
+                if !non_lazy_reachable.contains(&x) {
+                    lazy_exclusive_reachable.insert(x);
+                }
+                node = x;
+                visited.insert(x);
+            }
+        }
+        for neighbor in graph.neighbors_directed(node, petgraph::Direction::Outgoing){
+            if !visited.contains(&neighbor){
+                lazy_nodes.push(neighbor);
+            }
+        }
     }
+
+    // println!("graph: {:#?}", graph);
+    println!("reachables: {}\n{:#?}", non_lazy_reachable.len(), non_lazy_reachable);
+    generate_dot_file(&graph, &non_lazy_reachable, "non_lazy.dot");
+    generate_dot_file(&graph, &lazy_exclusive_reachable, "lazy.dot");
+
     Ok(())
 }
 
@@ -344,4 +416,36 @@ fn find_seg_id(list: &Vec<MemEntry>, index: &u32, addend: &i32) -> i32 {
     // println!("met: {}", met );
     // assert!(id > -1);    //TODO: for now I'm skipping the out of range offsets!
     id //as u32
+}
+fn generate_dot_file(graph: &petgraph::graphmap::GraphMap<Node, i32, petgraph::Directed>, nodes_hash: &HashSet<Node>,
+                    fl_name: &str){
+    let mut output = "digraph G {\n".to_string();
+    // let mut nodes_set: BTreeSet<Node> = root_nodes.iter().cloned().collect();
+    // let mut node: Node;
+    for node in nodes_hash.iter() {
+        let src_text: String;
+        match *node {
+            Node::Func(x) => src_text = format!("Func{}", x.id()),
+            Node:: Mem(x) => src_text = format!("Mem{}", x.id())
+        }
+        for to in graph.neighbors_directed(*node, petgraph::Direction::Outgoing) {
+            match to {
+                Node::Func(y) => output += &format!("{} -> Func{};\n", src_text, y.id()),
+                Node::Mem(y) => output += &format!("{} -> Mem{};\n", src_text, y.id())
+            }
+        }
+    }
+    output += "}";
+
+    // println!("{}",output );
+    let dot_file = path::Path::new(fl_name);
+    let mut file = match fs::File::create(&dot_file) {
+        Err(oops) => panic! ("couldn't create dot file! {} {:?}", oops, dot_file),
+        Ok(fl) => fl,
+    };
+
+    match file.write_all(output.as_bytes()) {
+        Err(oops) => panic!("cannot write into file {}", oops),
+        Ok(_) => (),
+    }
 }
