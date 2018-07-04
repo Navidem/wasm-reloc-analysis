@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::iter::FromIterator;
 
 use parity_wasm::elements::{Deserialize, CodeSection, RelocSection, ExportSection, NameSection, 
-ModuleNameSection, FunctionNameSection, MemorySection, DataSection, RelocationEntry,
+ModuleNameSection, FunctionNameSection, MemorySection, DataSection, RelocationEntry, CustomSection,
 Instruction, FuncBody, ImportEntry, Internal, Module, Section, Serialize, VarUint32, VarUint7};
 
 #[derive(Clone, Copy, PartialEq, Ord, Eq, PartialOrd, Hash, Debug, Default)]
@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<std::error::Error>>{
     let mut name_section = NameSection::Unparsed{name_type: 0, name_payload: Vec::new()};
     let mut memory_section = MemorySection::with_entries([].to_vec());
     let mut data_section = DataSection::with_entries([].to_vec());
-
+    let mut wasm_custom_section = CustomSection::default();
     //println!("reloc: {:#?}", reloc.unwrap() );
     for sec in sections {
         // let mut w: Vec<u8> = Vec::new();         Serializing is not accurate for section addr finding!
@@ -198,10 +198,17 @@ fn main() -> Result<(), Box<std::error::Error>>{
             Section::Name(x) => name_section = x,
             Section::Memory(x) => memory_section = x,
             Section::Data(x) => data_section = x,
+            Section::Custom(x) => {
+                if x.name() == "_lazy_wasm_" {
+                    wasm_custom_section = x
+                }
+            }
             _ => (),
         };
         
     }
+
+    println!("wasm_custom {:#?}", wasm_custom_section);
     // println!("name Section{:#?}", name_section);
     // println!("Export: {:#?}",export_sections );
     // println!("Code: {:#?}", code_section);
@@ -347,7 +354,7 @@ fn main() -> Result<(), Box<std::error::Error>>{
         }
         log += &format!("-> {:?} ", node);
         for neighbor in graph.neighbors_directed(node, petgraph::Direction::Outgoing){
-            if !visited.contains(&neighbor){
+            if !visited.contains(&neighbor) && !lazy_roots.contains(&neighbor){ //skip visited nodes and lazy roots
                 non_lazy_nodes.push(neighbor);
             }
         }
