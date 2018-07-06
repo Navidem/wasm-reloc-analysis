@@ -276,6 +276,11 @@ fn main() -> Result<(), Box<std::error::Error>>{
         );
     }
 
+    let mut dl_export_candidates: HashSet<Node> = HashSet::new();
+    for lazy in lazy_roots.iter() {
+        non_lazy_roots.remove(lazy);
+        dl_export_candidates.insert(*lazy);
+    }
     //println!("non_lazy root: {}\n{:#?}", non_lazy_roots.len(), non_lazy_roots);
 
 /*     for (i, func) in (bodies).iter().enumerate(){
@@ -372,14 +377,19 @@ fn main() -> Result<(), Box<std::error::Error>>{
         match non_lazy_nodes.pop(){
             None => break,
             Some(x) => {
-                non_lazy_reachable.insert(x);
+                // if !lazy_roots.contains(&x){
+                    non_lazy_reachable.insert(x);
+                // }
                 node = x;
                 visited.insert(x);
             }
         }
         log += &format!("-> {:?} ", node);
         for neighbor in graph.neighbors_directed(node, petgraph::Direction::Outgoing){
-            if !visited.contains(&neighbor) && !lazy_roots.contains(&neighbor){ //skip visited nodes and lazy roots
+            // if lazy_roots.contains(&neighbor){ //should not be required
+            //     continue;
+            // }
+            if (!visited.contains(&neighbor)) && (!lazy_roots.contains(&neighbor)) { //skip visited nodes and lazy roots
                 non_lazy_nodes.push(neighbor);
             }
         }
@@ -396,6 +406,9 @@ fn main() -> Result<(), Box<std::error::Error>>{
                 if !non_lazy_reachable.contains(&x) {
                     lazy_exclusive_reachable.insert(x);
                 }
+                else { //we've reached a node that is in non_lazy_reachable
+                    dl_export_candidates.insert(x);
+                }
                 node = x;
                 visited.insert(x);
             }
@@ -407,10 +420,21 @@ fn main() -> Result<(), Box<std::error::Error>>{
         }
     }
 
+    assert!(non_lazy_reachable.is_disjoint(&lazy_exclusive_reachable));
+
     println!("graph: {:#?}", graph);
     println!("reachables: {}\n{:#?}", non_lazy_reachable.len(), non_lazy_reachable);
+    println!("dl exports: {:?}", dl_export_candidates);
     generate_dot_file(&graph, &non_lazy_reachable, "non_lazy.dot");
     generate_dot_file(&graph, &lazy_exclusive_reachable, "lazy.dot");
+
+    println!("lazy exclusive reachable legend:" );
+    for node in lazy_exclusive_reachable.iter() {
+        match node {
+            Node::Func(x) => println!("Func{}: {}",x.id(), func_name_map.get(x.id()).unwrap()),
+            _ => ()
+        }
+    }
 
     Ok(())
 }
