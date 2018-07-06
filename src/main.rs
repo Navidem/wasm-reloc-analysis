@@ -1,14 +1,16 @@
 extern crate parity_wasm;
 extern crate petgraph;
 extern crate wasmparser;
+extern crate byteorder;
 use wasmparser::WasmDecoder;
 use petgraph::graphmap::DiGraphMap;
 use std::{env, io, fs, path};
 use std::io::Write;
-use std::collections::HashSet;
-use std::collections::BTreeSet;
-use std::iter::FromIterator;
-
+use std::collections::{HashSet, HashMap};
+//use std::collections::BTreeSet;
+// use std::iter::FromIterator;
+// use std::io::prelude::Read;
+use byteorder::{LittleEndian, ByteOrder};
 use parity_wasm::elements::{Deserialize, CodeSection, RelocSection, ExportSection, NameSection, 
 ModuleNameSection, FunctionNameSection, MemorySection, DataSection, RelocationEntry, CustomSection,
 Instruction, FuncBody, ImportEntry, Internal, Module, Section, Serialize, VarUint32, VarUint7};
@@ -84,7 +86,8 @@ fn main() -> Result<(), Box<std::error::Error>>{
     let data = fs::read(path)?;
     let mut parser = wasmparser::Parser::new(&data);
     let mut next_input = wasmparser::ParserInput::Default;
-    loop {  //reading the header to get code and funcs start addr
+    //reading the header to get code and funcs start addr; or anything related to size!
+    loop {  
         let state = parser.read_with_input(next_input);
         match *state {
             wasmparser::ParserState::EndWasm => break,
@@ -208,7 +211,10 @@ fn main() -> Result<(), Box<std::error::Error>>{
         
     }
 
-    println!("wasm_custom {:#?}", wasm_custom_section);
+    if wasm_custom_section.name() != "_lazy_wasm_" {
+        panic!("ERROR! no WASM_CUSTOM_SECTION");
+    }
+
     // println!("name Section{:#?}", name_section);
     // println!("Export: {:#?}",export_sections );
     // println!("Code: {:#?}", code_section);
@@ -227,9 +233,32 @@ fn main() -> Result<(), Box<std::error::Error>>{
     let bodies = code_section.bodies();
     let func_name_map = func_name_section.names(); 
     // println!("Dumping Table sectoion's Elements: {}", func_table_entries.len());
-    // for index in func_table_entries {
-    //     println!("Entry {}: {:#?}", index, func_name_map.get(index as u32).unwrap() );
+    // for index in func_table_entries.iter() {
+    //     println!("Entry {}: {:#?}", index, func_name_map.get(*index as u32).unwrap() );
     // }
+    let func_id_map = inverse_name_map(func_name_map);
+
+
+    //reading wasm_custom_section payload
+    println!("wasm_custom {:#?}", wasm_custom_section);
+    let payload = wasm_custom_section.payload();
+    // println!("{:?}", payload);
+    let lazy_func_num = LittleEndian::read_u32(&payload);
+    let mut met = 4;
+    for _ in 0..lazy_func_num {
+        let lazy_name_len = LittleEndian::read_u32(&payload[met..]) as usize;
+        met += 4;
+        let lazy_name = String::from_utf8(payload[met..(lazy_name_len+met)].to_vec())?;
+        met += lazy_name_len;
+        let lazy_id = match func_id_map.get(&lazy_name) {
+            None => panic!("Couldn't find lazy function name in name section: {}", lazy_name),
+            Some(x) => x
+        };
+        lazy_roots.insert(Node::Func(func_entry_list[*lazy_id as usize]));
+        println!("{}: {}",lazy_name_len, lazy_name);
+    }
+    println!("lazy roots: {:?}",lazy_roots );
+
 
     for entry in exported_func_ids {
         non_lazy_roots.insert(
@@ -248,10 +277,6 @@ fn main() -> Result<(), Box<std::error::Error>>{
     }
 
     //println!("non_lazy root: {}\n{:#?}", non_lazy_roots.len(), non_lazy_roots);
-    //TODO: fill in lazy_root via wasm custome section
-    non_lazy_roots.remove(&Node::Func(func_entry_list[5 as usize]));
-    lazy_roots.insert(Node::Func(func_entry_list[5 as usize]));
-    //////TODO: ^^^^^^^^
 
 /*     for (i, func) in (bodies).iter().enumerate(){
         //let locals = func.locals();
@@ -360,9 +385,6 @@ fn main() -> Result<(), Box<std::error::Error>>{
         }
     }
 
-///////
-non_lazy_reachable.remove(&Node::Func(func_entry_list[5 as usize]));
-///////
     let mut lazy_exclusive_reachable: HashSet<Node> = HashSet::new();
     let mut lazy_nodes: Vec<Node> = lazy_roots.into_iter().collect();
     visited.clear();
@@ -385,7 +407,7 @@ non_lazy_reachable.remove(&Node::Func(func_entry_list[5 as usize]));
         }
     }
 
-    // println!("graph: {:#?}", graph);
+    println!("graph: {:#?}", graph);
     println!("reachables: {}\n{:#?}", non_lazy_reachable.len(), non_lazy_reachable);
     generate_dot_file(&graph, &non_lazy_reachable, "non_lazy.dot");
     generate_dot_file(&graph, &lazy_exclusive_reachable, "lazy.dot");
@@ -455,4 +477,13 @@ fn generate_dot_file(graph: &petgraph::graphmap::GraphMap<Node, i32, petgraph::D
         Err(oops) => panic!("cannot write into file {}", oops),
         Ok(_) => (),
     }
+}
+
+fn inverse_name_map(name_map: &parity_wasm::elements::IndexMap<String>) -> HashMap<String, u32> {
+    let len = name_map.len();
+    let mut id_map = HashMap::with_capacity(len);
+    for (id, name) in name_map.iter() {
+        id_map.insert(name.clone(), id);
+    }
+    id_map
 }

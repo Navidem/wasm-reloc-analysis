@@ -7,3 +7,4 @@ authors = ["Navidem <navid.emamdoost@gmail.com>"]
 parity-wasm = "0.31.0"
 petgraph = "0.4.12"
 wasmparser = "0.17.0"
+byteorder = "1.2.3"
