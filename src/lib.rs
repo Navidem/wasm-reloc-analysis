@@ -542,6 +542,7 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
     let mut memory_section: MemorySection = MemorySection::default();
     let mut table_section: TableSection = TableSection::default();
     let mut element_section: ElementSection = ElementSection::default();
+    let mut import_func_map: HashMap<u32, u32> = HashMap::new();
     
     let global_section = module.global_section().unwrap();
 
@@ -565,9 +566,12 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
                 new_module = new_module.memory().build(); //just a dummy memory, to be replaced later by module's memory section
             } 
             Section::Global(glob_section) => {
-                let global_entries = parse_global_section(&glob_section, &lazy_nodes, is_lazy);
-                for glob in global_entries {
-                    new_module = new_module.with_global(glob);
+                // let global_entries = parse_global_section(&glob_section, &lazy_nodes, is_lazy);
+                // for glob in global_entries {
+                //     new_module = new_module.with_global(glob);
+                // }
+                for glob in glob_section.entries() {
+                    new_module = new_module.with_global(glob.clone());
                 }
             }
             Section::Table(tl) => {
@@ -595,19 +599,20 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
                 }
             }
             Section::Import(import_section) => {
-                let mut import_entries: Vec<ImportEntry> = Vec::new();
+                // let mut import_entries: Vec<ImportEntry> = Vec::new();
                 for entry in import_section.entries() {    //add any importEntry from original module
-                    import_entries.push(entry.clone());
+                    // import_entries.push(entry.clone());
+                    new_module.push_import(entry.clone());
                 }
                 if !is_lazy {   //add lazy_roots
-                    import_entries.extend(push_import_candidates(&lazy_nodes, &global_section));
+                    push_import_candidates_to_module(&module, &mut new_module, &lazy_nodes, &mut import_func_map);
                 }
                 else {  // add nodes from main.wasm
-                    import_entries.extend(push_import_candidates(&export_candidates, &global_section));
+                    push_import_candidates_to_module(&module, &mut new_module, &export_candidates, &mut import_func_map);
                 }
-                for imp in import_entries {
-                    new_module.push_import(imp);
-                }
+                // for imp in import_entries {
+                //     new_module.push_import(imp);
+                // }
 
             }
             _ => (), //TODO others
@@ -620,6 +625,23 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
             Section::Memory(ref mut x) => *x = memory_section.clone(),
             Section::Table(ref mut x) => *x = table_section.clone(),
             Section::Element(ref mut x) => *x = element_section.clone(),
+            Section::Code(section) => { //look for call to imported funcs, and replace the ids
+                for body in section.bodies_mut() {
+                    let code = body.code_mut();
+                        for insn in code.elements_mut() {
+                            match insn {
+                                Instruction::Call(callee) => {
+                                    match import_func_map.get(callee) {
+                                        Some(x) => *insn = Instruction::Call(*x),
+                                        None => (),
+                                    }
+                                }
+                                _ => (),
+                            }
+                        
+                    }
+                }
+            }
             _ => ()
         }
     }
@@ -642,30 +664,49 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
     }
 
 }
-fn push_import_candidates(node_set: &HashSet<Node>, global_section: &GlobalSection) -> Vec<ImportEntry> {
-    let mut out_list: Vec<ImportEntry> = Vec::new();
+fn push_import_candidates_to_module(original_module: &Module, new_module: &mut ModuleBuilder, node_set: &HashSet<Node>,
+                                    imported_map: &mut HashMap<u32, u32>) {
+    //let mut out_list: Vec<ImportEntry> = Vec::new();
+    let global_section = original_module.global_section().unwrap();
+    let function_section = original_module.function_section().unwrap();
+    let type_section = original_module.type_section().unwrap();
 
     for node in node_set {
         let mut import_entry = parity_wasm::elements::ImportEntry::new(String::from("module_tbd"), String::from("field_tbd"), 
             parity_wasm::elements::External::Function(0));
         match node {
             Node::Func(x) => {
-                *import_entry.external_mut() = parity_wasm::elements::External::Function((*x).id());
-
-            out_list.push(import_entry.clone());
-
+                let old_func_idx = (*x).id();
+                let func = function_section.entries()[old_func_idx as usize];
+                let type_index = func.type_ref();
+                let type_entry = &type_section.types()[type_index as usize];
+                let func_type = match type_entry {
+                    parity_wasm::elements::Type::Function(ref x) => x,
+                    };
+                let params = func_type.params().to_vec();
+                let return_type = func_type.return_type();
+                let sig = signature().with_params(params).with_return_type(return_type).build_sig();                
+                // push the new type into the new module and use it as ref in import entry
+                let new_type_idx = new_module.push_signature(sig);
+                *import_entry.external_mut() = parity_wasm::elements::External::Function(new_type_idx);
+                let new_func_idx = new_module.push_import(import_entry);
+                println!("import entry {}", new_func_idx);
+                let mut imported_func_idx_map: HashMap<u32, u32> = HashMap::new();
+                imported_map.insert(old_func_idx, new_func_idx);
+                //  out_list.push(import_entry.clone());
             }
             Node::Mem(_x) => { //seems here we need to do nothing! as we have just one memory[0]
                 ;
                 // *import_entry.external_mut() = parity_wasm::elements::External::Memory(
                 //      parity_wasm::elements::MemoryType::new(0, 1) );
             }
-            Node::Global(x) => {
-                let global_entries = global_section.entries();
-                let glob_entry = &global_entries[(*x).index() as usize];
-                *import_entry.external_mut() = parity_wasm::elements::External::Global(*glob_entry.global_type());
-
-                out_list.push(import_entry.clone());
+            Node::Global(_x) => { // having the same global section for both wasms
+                ;
+                // let global_entries = global_section.entries();
+                // let glob_entry = &global_entries[(*x).index() as usize];
+                // *import_entry.external_mut() = parity_wasm::elements::External::Global(*glob_entry.global_type());
+                // new_module.push_import(import_entry);
+                // out_list.push(import_entry.clone());
             }
             Node::Table(_x) => { //for now we just have one table section
                 ;
@@ -676,7 +717,7 @@ fn push_import_candidates(node_set: &HashSet<Node>, global_section: &GlobalSecti
             }
         }
     }
-    return out_list;
+    // return out_list;
 }
 
 fn parse_export_section(export_section: &ExportSection, lazy_nodes: &HashSet<Node>, func_list: &Vec<FuncEntry>, data_list: &Vec<MemEntry>, 
@@ -695,7 +736,7 @@ fn parse_export_section(export_section: &ExportSection, lazy_nodes: &HashSet<Nod
             out_list.push(entry.clone());
         }
         else {
-            let dummy_exp = parity_wasm::elements::ExportEntry::new(String::from("dummy"), parity_wasm::elements::Internal::Function(0));
+            let dummy_exp = parity_wasm::elements::ExportEntry::new(String::from("field_dummy"), parity_wasm::elements::Internal::Function(0));
             out_list.push(dummy_exp);
         }
     }
@@ -707,19 +748,19 @@ fn push_export_candidates(candidates: &HashSet<Node>) -> Vec<parity_wasm::elemen
         let mut exp_entry = parity_wasm::elements::ExportEntry::new(String::from(""), parity_wasm::elements::Internal::Function(0));
         match entry {
             Node::Func(x) => {
-                *exp_entry.field_mut() = String::from("Func");
+                *exp_entry.field_mut() = String::from("Func_export");
                 *exp_entry.internal_mut() = parity_wasm::elements::Internal::Function((*x).id());
             }
             Node::Mem(x) => {
-                *exp_entry.field_mut() = String::from("Mem");
+                *exp_entry.field_mut() = String::from("Mem_export");
                 *exp_entry.internal_mut() = parity_wasm::elements::Internal::Memory((*x).id());   
             }
             Node::Global(x) => {
-                *exp_entry.field_mut() = String::from("Global");
+                *exp_entry.field_mut() = String::from("Global_export");
                 *exp_entry.internal_mut() = parity_wasm::elements::Internal::Global((*x).index() );                
             }
             Node::Table(x) => {
-                *exp_entry.field_mut() = String::from("Table");
+                *exp_entry.field_mut() = String::from("Table_export");
                 *exp_entry.internal_mut() = parity_wasm::elements::Internal::Table((*x).index());                
             }
         }
