@@ -443,8 +443,8 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
 
     assert!(non_lazy_reachable.is_disjoint(&lazy_exclusive_reachable));
 
-    println!("graph: {:#?}", graph);
-    println!("reachables: {}\n{:#?}", non_lazy_reachable.len(), non_lazy_reachable);
+    // println!("graph: {:#?}", graph);
+    // println!("reachables: {}\n{:#?}", non_lazy_reachable.len(), non_lazy_reachable);
     println!("dl exports: {:?}", dl_export_candidates);
     generate_dot_file(&graph, &non_lazy_reachable, "non_lazy.dot");
     generate_dot_file(&graph, &lazy_exclusive_reachable, "lazy.dot");
@@ -587,9 +587,10 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
                 element_section = el.clone();
             }
             Section::Export(export_section) => {
-                let mut export_entries = parse_export_section(export_section, &lazy_nodes, func_list, data_list, is_lazy);
+                let mut exported_nodes: HashSet<Node> = HashSet::new();
+                let mut export_entries = parse_export_section(export_section, &lazy_nodes, func_list, data_list, &mut exported_nodes, is_lazy);
                 if !is_lazy {
-                    export_entries.extend(push_export_candidates(export_candidates));
+                    export_entries.extend(push_export_candidates(export_candidates, &exported_nodes));
                 }
                 // else { //export lazy nodes, already is added in parse_export_section
                 //     export_entries.extend(push_candidates(lazy_nodes));
@@ -636,7 +637,7 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
                                         None => (),
                                     }
                                 }
-                                _ => (),
+                                _ => (), //don't care for other insns
                             }
                         
                     }
@@ -670,6 +671,7 @@ fn push_import_candidates_to_module(original_module: &Module, new_module: &mut M
     let global_section = original_module.global_section().unwrap();
     let function_section = original_module.function_section().unwrap();
     let type_section = original_module.type_section().unwrap();
+    let mut imported_func_num: u32 = 0;
 
     for node in node_set {
         let mut import_entry = parity_wasm::elements::ImportEntry::new(String::from("module_tbd"), String::from("field_tbd"), 
@@ -689,10 +691,10 @@ fn push_import_candidates_to_module(original_module: &Module, new_module: &mut M
                 // push the new type into the new module and use it as ref in import entry
                 let new_type_idx = new_module.push_signature(sig);
                 *import_entry.external_mut() = parity_wasm::elements::External::Function(new_type_idx);
-                let new_func_idx = new_module.push_import(import_entry);
-                println!("import entry {}", new_func_idx);
-                let mut imported_func_idx_map: HashMap<u32, u32> = HashMap::new();
-                imported_map.insert(old_func_idx, new_func_idx);
+                new_module.push_import(import_entry);
+                // println!("import entry {}", new_func_idx);
+                imported_map.insert(old_func_idx, imported_func_num);
+                imported_func_num += 1;
                 //  out_list.push(import_entry.clone());
             }
             Node::Mem(_x) => { //seems here we need to do nothing! as we have just one memory[0]
@@ -721,7 +723,7 @@ fn push_import_candidates_to_module(original_module: &Module, new_module: &mut M
 }
 
 fn parse_export_section(export_section: &ExportSection, lazy_nodes: &HashSet<Node>, func_list: &Vec<FuncEntry>, data_list: &Vec<MemEntry>, 
-                        is_lazy: bool) -> Vec<parity_wasm::elements::ExportEntry> {
+                        exported_nodes: &mut HashSet<Node>, is_lazy: bool) -> Vec<parity_wasm::elements::ExportEntry> {
     let mut out_list: Vec<parity_wasm::elements::ExportEntry> = Vec::new();
     let mut node: Node = Node::Func(func_list[0]);
     for entry in export_section.entries() {
@@ -734,17 +736,21 @@ fn parse_export_section(export_section: &ExportSection, lazy_nodes: &HashSet<Nod
         if (!is_lazy && !lazy_nodes.contains(&node)) ||
         (is_lazy && lazy_nodes.contains(&node)) {
             out_list.push(entry.clone());
+            exported_nodes.insert(node);
         }
         else {
-            let dummy_exp = parity_wasm::elements::ExportEntry::new(String::from("field_dummy"), parity_wasm::elements::Internal::Function(0));
-            out_list.push(dummy_exp);
+            // let dummy_exp = parity_wasm::elements::ExportEntry::new(String::from("field_dummy"), parity_wasm::elements::Internal::Function(0));
+            // out_list.push(dummy_exp);
         }
     }
     return out_list;
 }
-fn push_export_candidates(candidates: &HashSet<Node>) -> Vec<parity_wasm::elements::ExportEntry> {
+fn push_export_candidates(candidates: &HashSet<Node>, exported_nodes: &HashSet<Node>) -> Vec<parity_wasm::elements::ExportEntry> {
     let mut out_list: Vec<parity_wasm::elements::ExportEntry> = Vec::new();
     for entry in candidates {
+        if exported_nodes.contains(entry) {
+            continue;
+        }
         let mut exp_entry = parity_wasm::elements::ExportEntry::new(String::from(""), parity_wasm::elements::Internal::Function(0));
         match entry {
             Node::Func(x) => {
@@ -825,14 +831,14 @@ fn parse_code_section(code: &CodeSection, type_section: &TypeSection, function_s
             out_list.push(func);
         }
         else {  
-            let empty: Vec<parity_wasm::elements::ValueType> = vec![];
-            let sig = signature().with_params(empty).with_return_type(None).build_sig();   
-            let unreach_insns = parity_wasm::elements::Instructions::new(
-                vec![Instruction::Unreachable, Instruction::End]
-            );
-            let func = function().with_signature(sig)
-                        .body().with_instructions(unreach_insns).build().build();
-            out_list.push(func);
+            // let empty: Vec<parity_wasm::elements::ValueType> = vec![];
+            // let sig = signature().with_params(empty).with_return_type(None).build_sig();   
+            // let unreach_insns = parity_wasm::elements::Instructions::new(
+            //     vec![Instruction::Unreachable, Instruction::End]
+            // );
+            // let func = function().with_signature(sig)
+            //             .body().with_instructions(unreach_insns).build().build();
+            // out_list.push(func);
         }
     }
     return out_list;
