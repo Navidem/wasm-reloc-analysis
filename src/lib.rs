@@ -13,7 +13,7 @@ use std::collections::{HashSet, HashMap};
 use byteorder::{LittleEndian, ByteOrder};
 use parity_wasm::elements::{Deserialize, CodeSection, RelocSection, ExportSection, NameSection, 
 ModuleNameSection, FunctionNameSection, MemorySection, DataSection, RelocationEntry, CustomSection,
-TypeSection, FunctionSection, DataSegment, GlobalSection, TableSection, ElementSection,
+TypeSection, FunctionSection, DataSegment, GlobalSection, TableSection, ElementSection, ImportSection,
 Instruction, FuncBody, ImportEntry, Internal, Module, Section, Serialize, VarUint32, VarUint7};
 use parity_wasm::builder::*;
 
@@ -112,6 +112,75 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
     let data = fs::read(path)?;
     let mut parser = wasmparser::Parser::new(&data);
     let mut next_input = wasmparser::ParserInput::Default;
+
+    let module = Module::deserialize(&mut file)?;
+    let reloc_mod = module.clone().parse_reloc().unwrap();  //parses relocation section in module
+    let name_reloc_mod = reloc_mod.clone().parse_names().unwrap();   // parses name section
+    //println!("{:#?}", name_mod);
+    let sections = name_reloc_mod.into_sections();
+
+    let mut reloc_sections: Vec<RelocSection> = Vec::new();
+    let mut export_sections: Vec<ExportSection> = Vec::new();
+    let mut code_section = CodeSection::default();
+    let mut name_section = NameSection::Unparsed{name_type: 0, name_payload: Vec::new()};
+    let mut memory_section = MemorySection::with_entries([].to_vec());
+    let mut data_section = DataSection::with_entries([].to_vec());
+    let mut wasm_custom_section = CustomSection::default();
+    let mut import_section = ImportSection::default();
+    //println!("reloc: {:#?}", reloc.unwrap() );
+    for sec in sections {
+        // let mut w: Vec<u8> = Vec::new();         Serializing is not accurate for section addr finding!
+        // sec.clone().serialize(&mut w)?;
+        // println!("sec len: {}", w.len());
+        match sec{
+            Section::Import(x) => import_section = x,
+            Section::Reloc(x) => reloc_sections.push(x),
+            Section::Export(x) => export_sections.push(x),
+            Section::Code(x) => code_section = x,
+            Section::Name(x) => name_section = x,
+            Section::Memory(x) => memory_section = x,
+            Section::Data(x) => data_section = x,
+            Section::Custom(x) => {
+                if x.name() == "_lazy_wasm_" {
+                    wasm_custom_section = x
+                }
+            }
+            _ => (),
+        };
+        
+    }
+
+    if wasm_custom_section.name() != "_lazy_wasm_" {
+        panic!("ERROR! no WASM_CUSTOM_SECTION");
+    }
+
+    // println!("name Section{:#?}", name_section);
+    // println!("Export: {:#?}",export_sections );
+    // println!("Code: {:#?}", code_section);
+    // println!("Data: {:#?}", data_section );
+    // println!("Reloc: {:#?}",reloc_sections );
+
+    let mut mod_name_section = ModuleNameSection::new(""); 
+    let mut func_name_section = FunctionNameSection::default();
+    match name_section {
+        NameSection::Module(x) => mod_name_section = x,
+        NameSection::Function(x) => func_name_section = x,
+        _ => (),
+    }
+
+    //counting number of imported functions
+    for imp in import_section.entries() {
+        match imp.external() {
+            parity_wasm::elements::External::Function(_) => {
+                func_entry_list.push(
+                    FuncEntry{id: func_counter, start: 0, end: 0}   //special case of functions (imported)
+                );
+                func_counter += 1;
+            }
+            _ => (),
+        }
+    }
+
     //reading the header to get code and funcs start addr; or anything related to size!
     loop {  
         let state = parser.read_with_input(next_input);
@@ -145,17 +214,22 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
                     }
 
             },
-            wasmparser::ParserState::BeginFunctionBody { range } /*|
-            wasmparser::ParserState::FunctionBodyLocals {.. } |
-            wasmparser::ParserState::CodeOperator { .. } |
-            wasmparser::ParserState::EndFunctionBody { .. }*/ => {
+            wasmparser::ParserState::BeginFunctionBody { range }  => {
+                println!("{}: {:#?}", func_counter, state);
                 func_entry_list.push(
                     FuncEntry{id: func_counter, start: range.start, end: range.end}
                     );
                 func_counter += 1;
-                next_input = wasmparser::ParserInput::SkipFunctionBody;
+                next_input = wasmparser::ParserInput::Default;
 
             },
+            
+            wasmparser::ParserState::FunctionBodyLocals {.. } |
+            wasmparser::ParserState::CodeOperator { .. } |
+            wasmparser::ParserState::EndFunctionBody { .. } => {
+                //next_input = wasmparser::ParserInput::SkipSection;
+            }
+
             wasmparser::ParserState::BeginDataSectionEntry {..} |
             wasmparser::ParserState::DataSectionEntryBodyChunk {..}|
             wasmparser::ParserState::EndDataSectionEntry{..}|
@@ -204,58 +278,6 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
     assert!(code_start_addr != 0);
     // println!("FUNCS: {}\n{:?}",func_counter, func_entry_list );
 
-    let module = Module::deserialize(&mut file)?;
-    let reloc_mod = module.clone().parse_reloc().unwrap();  //parses relocation section in module
-    let name_reloc_mod = reloc_mod.clone().parse_names().unwrap();   // parses name section
-    //println!("{:#?}", name_mod);
-    let sections = name_reloc_mod.into_sections();
-
-    let mut reloc_sections: Vec<RelocSection> = Vec::new();
-    let mut export_sections: Vec<ExportSection> = Vec::new();
-    let mut code_section = CodeSection::default();
-    let mut name_section = NameSection::Unparsed{name_type: 0, name_payload: Vec::new()};
-    let mut memory_section = MemorySection::with_entries([].to_vec());
-    let mut data_section = DataSection::with_entries([].to_vec());
-    let mut wasm_custom_section = CustomSection::default();
-    //println!("reloc: {:#?}", reloc.unwrap() );
-    for sec in sections {
-        // let mut w: Vec<u8> = Vec::new();         Serializing is not accurate for section addr finding!
-        // sec.clone().serialize(&mut w)?;
-        // println!("sec len: {}", w.len());
-        match sec{
-            Section::Reloc(x) => reloc_sections.push(x),
-            Section::Export(x) => export_sections.push(x),
-            Section::Code(x) => code_section = x,
-            Section::Name(x) => name_section = x,
-            Section::Memory(x) => memory_section = x,
-            Section::Data(x) => data_section = x,
-            Section::Custom(x) => {
-                if x.name() == "_lazy_wasm_" {
-                    wasm_custom_section = x
-                }
-            }
-            _ => (),
-        };
-        
-    }
-
-    if wasm_custom_section.name() != "_lazy_wasm_" {
-        panic!("ERROR! no WASM_CUSTOM_SECTION");
-    }
-
-    // println!("name Section{:#?}", name_section);
-    // println!("Export: {:#?}",export_sections );
-    // println!("Code: {:#?}", code_section);
-    // println!("Data: {:#?}", data_section );
-    // println!("Reloc: {:#?}",reloc_sections );
-
-    let mut mod_name_section = ModuleNameSection::new(""); 
-    let mut func_name_section = FunctionNameSection::default();
-    match name_section {
-        NameSection::Module(x) => mod_name_section = x,
-        NameSection::Function(x) => func_name_section = x,
-        _ => (),
-    }
 
     let mut graph = DiGraphMap::new();
     let bodies = code_section.bodies();
@@ -289,6 +311,12 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
 
 
     for entry in exported_func_ids {
+        let nn = func_name_map.get(entry).unwrap();
+        // ////TEMPORARY until wasmparser problem with new compiler is resolved!
+        // if entry >= func_entry_list.len() as u32 {
+        //     continue;
+        // }
+        // ////////////////
         non_lazy_roots.insert(
             Node::Func(func_entry_list[entry as usize]) //SHOULD CLONE this??
         );
@@ -605,12 +633,7 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
                     // import_entries.push(entry.clone());
                     new_module.push_import(entry.clone());
                 }
-                if !is_lazy {   //add lazy_roots
-                    push_import_candidates_to_module(&module, &mut new_module, &lazy_nodes, &mut import_func_map);
-                }
-                else {  // add nodes from main.wasm
-                    push_import_candidates_to_module(&module, &mut new_module, &export_candidates, &mut import_func_map);
-                }
+
                 // for imp in import_entries {
                 //     new_module.push_import(imp);
                 // }
@@ -619,6 +642,16 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
             _ => (), //TODO others
         }
     }
+
+    // doing this here, because it maybe the caase that no import section be present, 
+    // but we want to have import section in output anyways
+    if !is_lazy {   //add lazy_roots
+        push_import_candidates_to_module(&module, &mut new_module, &lazy_nodes, &mut import_func_map);
+    }
+    else {  // add nodes from main.wasm
+        push_import_candidates_to_module(&module, &mut new_module, &export_candidates, &mut import_func_map);
+    }
+        
     let mut out_mod = new_module.build();
     //post processing sections: memory, table, element
     for sec in out_mod.sections_mut() {
@@ -631,8 +664,8 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
                     let code = body.code_mut();
                         for insn in code.elements_mut() {
                             match insn {
-                                Instruction::Call(callee) => {
-                                    match import_func_map.get(callee) {
+                                &mut Instruction::Call(callee) => {
+                                    match import_func_map.get(&callee) {
                                         Some(x) => *insn = Instruction::Call(*x),
                                         None => (),
                                     }
