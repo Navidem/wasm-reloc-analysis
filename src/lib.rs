@@ -4,7 +4,7 @@ extern crate wasmparser;
 extern crate byteorder;
 use wasmparser::WasmDecoder;
 use petgraph::graphmap::DiGraphMap;
-use std::{env, io, fs, path};
+use std::{env, io, fs, path, process};
 use std::io::Write;
 use std::collections::{HashSet, HashMap};
 //use std::collections::BTreeSet;
@@ -14,12 +14,14 @@ use byteorder::{LittleEndian, ByteOrder};
 use parity_wasm::elements::{Deserialize, CodeSection, RelocSection, ExportSection, NameSection, 
 ModuleNameSection, FunctionNameSection, MemorySection, DataSection, RelocationEntry, CustomSection,
 TypeSection, FunctionSection, DataSegment, GlobalSection, TableSection, ElementSection, ImportSection,
+NameMap,
 Instruction, FuncBody, ImportEntry, Internal, Module, Section, Serialize, VarUint32, VarUint7};
 use parity_wasm::builder::*;
 
 #[derive(Clone, Copy, PartialEq, Ord, Eq, PartialOrd, Hash, Debug, Default)]
 struct FuncEntry {
-    id: u32,
+    id: u32, // is in function index space (like used by call insn)
+    index: i32,     // is in local module space (sequence of locally defined funcs): special -1: for imported funcs
     start: usize,
     end: usize
 }
@@ -29,6 +31,9 @@ impl FuncEntry {
     }
     fn id(&self) -> u32 {
         self.id
+    }
+    fn index(&self) -> i32 {
+        self.index
     }
     fn end(&self) -> usize {
         self.end
@@ -89,7 +94,8 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
     let file = fs::File::open(path)?;
     let mut file = io::BufReader::new(file);
     let mut func_entry_list : Vec<FuncEntry> = Vec::new();
-    let mut func_counter = 0;
+    let mut func_id_counter = 0;
+    let mut func_index_counter = 0;
     let mut data_entry_list: Vec<MemEntry> = Vec::new();
     let mut data_counter = 0;
 
@@ -173,9 +179,9 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
         match imp.external() {
             parity_wasm::elements::External::Function(_) => {
                 func_entry_list.push(
-                    FuncEntry{id: func_counter, start: 0, end: 0}   //special case of functions (imported)
+                    FuncEntry{id: func_id_counter, index: -1, start: 0, end: 0}   //special case of functions (imported)
                 );
-                func_counter += 1;
+                func_id_counter += 1;
             }
             _ => (),
         }
@@ -215,20 +221,21 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
 
             },
             wasmparser::ParserState::BeginFunctionBody { range }  => {
-                println!("{}: {:#?}", func_counter, state);
+                // println!("{}: {:#?}", func_counter, state);
                 func_entry_list.push(
-                    FuncEntry{id: func_counter, start: range.start, end: range.end}
+                    FuncEntry{id: func_id_counter, index: func_index_counter, start: range.start, end: range.end}
                     );
-                func_counter += 1;
-                next_input = wasmparser::ParserInput::Default;
+                func_id_counter += 1;
+                func_index_counter += 1;
+                next_input = wasmparser::ParserInput::SkipFunctionBody;
 
             },
             
-            wasmparser::ParserState::FunctionBodyLocals {.. } |
-            wasmparser::ParserState::CodeOperator { .. } |
-            wasmparser::ParserState::EndFunctionBody { .. } => {
-                //next_input = wasmparser::ParserInput::SkipSection;
-            }
+            // wasmparser::ParserState::FunctionBodyLocals {.. } |
+            // wasmparser::ParserState::CodeOperator { .. } |
+            // wasmparser::ParserState::EndFunctionBody { .. } => {
+            //     //next_input = wasmparser::ParserInput::SkipSection;
+            // }
 
             wasmparser::ParserState::BeginDataSectionEntry {..} |
             wasmparser::ParserState::DataSectionEntryBodyChunk {..}|
@@ -311,12 +318,7 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
 
 
     for entry in exported_func_ids {
-        let nn = func_name_map.get(entry).unwrap();
-        // ////TEMPORARY until wasmparser problem with new compiler is resolved!
-        // if entry >= func_entry_list.len() as u32 {
-        //     continue;
-        // }
-        // ////////////////
+        // let nn = func_name_map.get(entry).unwrap();
         non_lazy_roots.insert(
             Node::Func(func_entry_list[entry as usize]) //SHOULD CLONE this??
         );
@@ -474,8 +476,8 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
     // println!("graph: {:#?}", graph);
     // println!("reachables: {}\n{:#?}", non_lazy_reachable.len(), non_lazy_reachable);
     println!("dl exports: {:?}", dl_export_candidates);
-    generate_dot_file(&graph, &non_lazy_reachable, "non_lazy.dot");
-    generate_dot_file(&graph, &lazy_exclusive_reachable, "lazy.dot");
+    // generate_dot_file(&graph, &non_lazy_reachable, "non_lazy.dot");
+    // generate_dot_file(&graph, &lazy_exclusive_reachable, "lazy.dot");
 
     println!("lazy exclusive reachable legend:" );
     for node in lazy_exclusive_reachable.iter() {
@@ -485,10 +487,32 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
         }
     }
 
+/////////////////// non-reloc wasm 
+
+    // // let mut command = process::Command::new("cargo"); 
+    // // command.args(&["+nightly", "build", "--target", "wasm32-unknown-unknown"])
+    // // //.env("RUSTFLAGS", "-C link-args=--relocatable")
+    // // .stderr(process::Stdio::piped())
+    // // .stdout(process::Stdio::null());
+
+    // // println!("{:?}", command );
+    // // let mut child = command.spawn()?;
+    // // let status = child.wait()?;
+
+    // // if !status.success() {
+    // //     println!("ERROR!" );
+    // //     println!("{:?}", command );        
+    // //     panic!("child process spawned: {:?}", status);
+    // // }
+
+    // let fff = path::Path::new("/Users/nemamdoost/project/userProjectWasm/userProjectWasm-nonReloc.wasm");
+    // let file = fs::File::open(path)?;
+    // let mut file = io::BufReader::new(file);
+    // let module = Module::deserialize(&mut file)?;
     //////////////////
     // build_lazy_wasm(&module, &lazy_exclusive_reachable, &lazy_roots, &dl_export_candidates);
-    build_wasm(&module, &lazy_exclusive_reachable, &dl_export_candidates, &func_entry_list, &data_entry_list, false);//main
-    build_wasm(&module, &lazy_exclusive_reachable, &dl_export_candidates, &func_entry_list, &data_entry_list, true);//lazy
+    build_wasm(&module, &lazy_exclusive_reachable, &dl_export_candidates, &func_entry_list, &func_name_map, &data_entry_list, false);//main
+    build_wasm(&module, &lazy_exclusive_reachable, &dl_export_candidates, &func_entry_list, &func_name_map, &data_entry_list, true);//lazy
     /////////////^^^^^ doing the division!
     Ok(())
 }
@@ -563,7 +587,7 @@ fn build_lazy_wasm(original_module: &Module, nodes_set: &HashSet<Node>, export_n
 } */
 
 fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &HashSet<Node>, 
-                    func_list: &Vec<FuncEntry>, data_list: &Vec<MemEntry>, is_lazy: bool) {
+                    func_list: &Vec<FuncEntry>, func_name_map: &NameMap, data_list: &Vec<MemEntry>, is_lazy: bool) {
     let mut new_module = ModuleBuilder::new();
     let type_section = module.type_section().unwrap();
     let function_section = module.function_section().unwrap();
@@ -571,6 +595,7 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
     let mut table_section: TableSection = TableSection::default();
     let mut element_section: ElementSection = ElementSection::default();
     let mut import_func_map: HashMap<u32, u32> = HashMap::new();
+    let mut imported_func_num: u32 = 0;
     
     let global_section = module.global_section().unwrap();
 
@@ -618,7 +643,7 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
                 let mut exported_nodes: HashSet<Node> = HashSet::new();
                 let mut export_entries = parse_export_section(export_section, &lazy_nodes, func_list, data_list, &mut exported_nodes, is_lazy);
                 if !is_lazy {
-                    export_entries.extend(push_export_candidates(export_candidates, &exported_nodes));
+                    export_entries.extend(push_export_candidates(export_candidates, &exported_nodes, func_name_map));
                 }
                 // else { //export lazy nodes, already is added in parse_export_section
                 //     export_entries.extend(push_candidates(lazy_nodes));
@@ -629,10 +654,15 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
             }
             Section::Import(import_section) => {
                 // let mut import_entries: Vec<ImportEntry> = Vec::new();
-                for entry in import_section.entries() {    //add any importEntry from original module
-                    // import_entries.push(entry.clone());
-                    new_module.push_import(entry.clone());
-                }
+                imported_func_num = parse_import_section(&mut new_module, &import_section, &type_section);
+                // for entry in import_section.entries() {    //add any importEntry from original module
+                //     // import_entries.push(entry.clone());
+                //     match entry.external() {
+                //         parity_wasm::elements::External::Function(_) => imported_func_num += 1,
+                //         _ => (),
+                //     }
+                //     new_module.push_import(entry.clone());
+                // }
 
                 // for imp in import_entries {
                 //     new_module.push_import(imp);
@@ -646,10 +676,10 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
     // doing this here, because it maybe the caase that no import section be present, 
     // but we want to have import section in output anyways
     if !is_lazy {   //add lazy_roots
-        push_import_candidates_to_module(&module, &mut new_module, &lazy_nodes, &mut import_func_map);
+        push_import_candidates_to_module(&module, &mut new_module, &lazy_nodes, func_name_map, imported_func_num, "lazy", &mut import_func_map);
     }
     else {  // add nodes from main.wasm
-        push_import_candidates_to_module(&module, &mut new_module, &export_candidates, &mut import_func_map);
+        push_import_candidates_to_module(&module, &mut new_module, &export_candidates, func_name_map, imported_func_num, "main", &mut import_func_map);
     }
         
     let mut out_mod = new_module.build();
@@ -698,21 +728,51 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &H
     }
 
 }
+fn parse_import_section(new_module: &mut ModuleBuilder, import_section: &ImportSection, type_section: &TypeSection) -> u32 {
+    let type_list = type_section.types();
+    let mut imported_func_num: u32 = 0;
+    for entry in import_section.entries() {    //add any importEntry from original module
+                // import_entries.push(entry.clone());
+    let mut entry_clone = entry.clone();
+    match entry.external() {
+        parity_wasm::elements::External::Function(ref old_type_index) => {
+            imported_func_num += 1;
+            let type_entry = &type_list[*old_type_index as usize];
+            let func_type = match type_entry {
+                parity_wasm::elements::Type::Function(ref x) => x,
+            };
+            let params = func_type.params().to_vec();
+            let return_type = func_type.return_type();
+            let sig = signature().with_params(params).with_return_type(return_type).build_sig();
+            let new_type_index = new_module.push_signature(sig);
+            *entry_clone.external_mut() = parity_wasm::elements::External::Function(new_type_index);
+        }
+        _ => (),
+       }
+        new_module.push_import(entry_clone);
+    }
+    return imported_func_num
+}
 fn push_import_candidates_to_module(original_module: &Module, new_module: &mut ModuleBuilder, node_set: &HashSet<Node>,
-                                    imported_map: &mut HashMap<u32, u32>) {
+                                    func_name_map: &NameMap, imported_func_num: u32, imp_module_name: &str, imported_map: &mut HashMap<u32, u32>) {
     //let mut out_list: Vec<ImportEntry> = Vec::new();
     let global_section = original_module.global_section().unwrap();
     let function_section = original_module.function_section().unwrap();
+    let function_section_entries = function_section.entries();
     let type_section = original_module.type_section().unwrap();
-    let mut imported_func_num: u32 = 0;
+    let mut new_func_id = imported_func_num;
 
     for node in node_set {
-        let mut import_entry = parity_wasm::elements::ImportEntry::new(String::from("module_tbd"), String::from("field_tbd"), 
+        let mut import_entry = parity_wasm::elements::ImportEntry::new(String::from(imp_module_name), String::from("field_tbd"), 
             parity_wasm::elements::External::Function(0));
         match node {
             Node::Func(x) => {
-                let old_func_idx = (*x).id();
-                let func = function_section.entries()[old_func_idx as usize];
+                //there is a difference between func.id vs func.index: id is function index space (used by call ir Element)
+                // while idx is in function section space (meaning that which function body corresponds to this func)
+                let old_func_id = (*x).id();
+                let old_func_index = (*x).index();
+                assert!(old_func_index >= 0);
+                let func = function_section_entries[old_func_index as usize];
                 let type_index = func.type_ref();
                 let type_entry = &type_section.types()[type_index as usize];
                 let func_type = match type_entry {
@@ -724,16 +784,17 @@ fn push_import_candidates_to_module(original_module: &Module, new_module: &mut M
                 // push the new type into the new module and use it as ref in import entry
                 let new_type_idx = new_module.push_signature(sig);
                 *import_entry.external_mut() = parity_wasm::elements::External::Function(new_type_idx);
+                *import_entry.field_mut() = func_name_map.get(old_func_id).unwrap().to_string();
                 new_module.push_import(import_entry);
                 // println!("import entry {}", new_func_idx);
-                imported_map.insert(old_func_idx, imported_func_num);
-                imported_func_num += 1;
+                imported_map.insert(old_func_id, new_func_id);
+                new_func_id += 1;
                 //  out_list.push(import_entry.clone());
             }
-            Node::Mem(_x) => { //seems here we need to do nothing! as we have just one memory[0]
-                ;
-                // *import_entry.external_mut() = parity_wasm::elements::External::Memory(
-                //      parity_wasm::elements::MemoryType::new(0, 1) );
+            Node::Mem(_x) => { 
+                *import_entry.field_mut() = String::from("Memory_0");
+                *import_entry.external_mut() = parity_wasm::elements::External::Memory(
+                     parity_wasm::elements::MemoryType::new(16, None) );
             }
             Node::Global(_x) => { // having the same global section for both wasms
                 ;
@@ -759,7 +820,12 @@ fn parse_export_section(export_section: &ExportSection, lazy_nodes: &HashSet<Nod
                         exported_nodes: &mut HashSet<Node>, is_lazy: bool) -> Vec<parity_wasm::elements::ExportEntry> {
     let mut out_list: Vec<parity_wasm::elements::ExportEntry> = Vec::new();
     let mut node: Node = Node::Func(func_list[0]);
+    let mut seen_name: HashSet<String> = HashSet::new();
+
     for entry in export_section.entries() {
+        if seen_name.contains(entry.field()){
+            continue;
+        }
         match entry.internal() {
             parity_wasm::elements::Internal::Function(x) => node = Node::Func(func_list[*x as usize]),
             parity_wasm::elements::Internal::Memory(x) => node = Node::Mem(data_list[*x as usize]),
@@ -775,11 +841,14 @@ fn parse_export_section(export_section: &ExportSection, lazy_nodes: &HashSet<Nod
             // let dummy_exp = parity_wasm::elements::ExportEntry::new(String::from("field_dummy"), parity_wasm::elements::Internal::Function(0));
             // out_list.push(dummy_exp);
         }
+        seen_name.insert(entry.field().to_string());
     }
     return out_list;
 }
-fn push_export_candidates(candidates: &HashSet<Node>, exported_nodes: &HashSet<Node>) -> Vec<parity_wasm::elements::ExportEntry> {
+fn push_export_candidates(candidates: &HashSet<Node>, exported_nodes: &HashSet<Node>, func_name_map: &NameMap)
+                             -> Vec<parity_wasm::elements::ExportEntry> {
     let mut out_list: Vec<parity_wasm::elements::ExportEntry> = Vec::new();
+    let mut counter = 0;
     for entry in candidates {
         if exported_nodes.contains(entry) {
             continue;
@@ -787,20 +856,22 @@ fn push_export_candidates(candidates: &HashSet<Node>, exported_nodes: &HashSet<N
         let mut exp_entry = parity_wasm::elements::ExportEntry::new(String::from(""), parity_wasm::elements::Internal::Function(0));
         match entry {
             Node::Func(x) => {
-                *exp_entry.field_mut() = String::from("Func_export");
+                *exp_entry.field_mut() = func_name_map.get((*x).id()).unwrap().to_string();//String::from("Func_export");
                 *exp_entry.internal_mut() = parity_wasm::elements::Internal::Function((*x).id());
             }
             Node::Mem(x) => {
-                *exp_entry.field_mut() = String::from("Mem_export");
-                *exp_entry.internal_mut() = parity_wasm::elements::Internal::Memory((*x).id());   
+                *exp_entry.field_mut() = format!("Memory_{}", counter);//String::from("Memory");
+                counter += 1;
+                *exp_entry.internal_mut() = parity_wasm::elements::Internal::Memory(0); //just memory 0   
             }
             Node::Global(x) => {
-                *exp_entry.field_mut() = String::from("Global_export");
+                *exp_entry.field_mut() = format!("Global_{}", counter);//String::from("Global_export");
+                counter += 1;
                 *exp_entry.internal_mut() = parity_wasm::elements::Internal::Global((*x).index() );                
             }
             Node::Table(x) => {
                 *exp_entry.field_mut() = String::from("Table_export");
-                *exp_entry.internal_mut() = parity_wasm::elements::Internal::Table((*x).index());                
+                *exp_entry.internal_mut() = parity_wasm::elements::Internal::Table(0); // just table 0               
             }
         }
         out_list.push(exp_entry.clone());
@@ -837,7 +908,7 @@ fn parse_data_section(data_sectoin: &DataSection, lazy_nodes: &HashSet<Node>, da
             out_list.push(seg.clone());
         }
         else { // is in lazy list: should be NOP, as the initilizer uses it
-            let dummy_expr = parity_wasm::elements::InitExpr::new(vec![Instruction::Nop, Instruction::End]);
+            let dummy_expr = parity_wasm::elements::InitExpr::new(vec![ Instruction::End]);
             let dummy_seg = DataSegment::new(seg.index(), dummy_expr, vec![]);
             out_list.push(dummy_seg);
         }
@@ -850,9 +921,16 @@ fn parse_code_section(code: &CodeSection, type_section: &TypeSection, function_s
     let ttyy = type_section.types();
     let funcs = function_section.entries();
     let bodies = code.bodies();
+    let mut imported_count = 0;
+    for ff in func_list.iter() {
+        if ff.index() != -1 {
+            break;
+        }
+        imported_count += 1;
+    }
     for (idx, func_body) in bodies.iter().enumerate() {
-        if (!is_lazy && !lazy_nodes.contains(&Node::Func(func_list[idx]))) ||
-         (is_lazy && lazy_nodes.contains(&Node::Func(func_list[idx]))) {  
+        if (!is_lazy && !lazy_nodes.contains(&Node::Func(func_list[idx+imported_count]))) ||
+         (is_lazy && lazy_nodes.contains(&Node::Func(func_list[idx+imported_count]))) {  
             let func_entry = funcs[idx];
             let func_type = match ttyy[func_entry.type_ref() as usize] {
                 parity_wasm::elements::Type::Function(ref x) => x,
