@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Navidem <navid.emamdoost@gmail.com>"]
 
 [dependencies]
-parity-wasm = "0.31.0"
+parity-wasm = {path = "/Users/nemamdoost/project/parity-wasm"}
 petgraph = "0.4.12"
 wasmparser = "0.17.0"
 byteorder = "1.2.3"

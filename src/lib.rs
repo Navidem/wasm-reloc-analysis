@@ -5,7 +5,7 @@ extern crate byteorder;
 use wasmparser::WasmDecoder;
 use petgraph::graphmap::DiGraphMap;
 use std::{env, io, fs, path, process};
-use std::io::Write;
+use std::io::{Write, Read, Seek, SeekFrom};
 use std::collections::{HashSet, HashMap};
 //use std::collections::BTreeSet;
 // use std::iter::FromIterator;
@@ -122,10 +122,13 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
     let mut next_input = wasmparser::ParserInput::Default;
 
     let module = Module::deserialize(&mut file)?;
+    ///////////////////
     let reloc_mod = module.clone().parse_reloc().unwrap();  //parses relocation section in module
     let name_reloc_mod = reloc_mod.clone().parse_names().unwrap();   // parses name section
     //println!("{:#?}", name_mod);
     let sections = name_reloc_mod.into_sections();
+    ///////////////////
+    // let sections = module.clone().into_sections();
 
     let mut reloc_sections: Vec<RelocSection> = Vec::new();
     let mut export_sections: Vec<ExportSection> = Vec::new();
@@ -191,10 +194,14 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
         }
     }
     let imported_func_num = func_id_counter;    //recording the number of imported functions
-
+    // let nnnn_str = "name";
+    // let name_str: &[u8] = nnnn_str.as_bytes();
+    // let NAME = wasmparser::SectionCode::Custom{name: name_str, kind: wasmparser::CustomSectionKind::Name};
+    // let mut data_copy = None;
     //reading the header to get code and funcs start addr; or anything related to size!
     loop {  
         let state = parser.read_with_input(next_input);
+        // println!("dbg {:?}", state );
         match *state {
             wasmparser::ParserState::EndWasm => break,
             wasmparser::ParserState::BeginWasm { .. } |
@@ -219,6 +226,11 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
                 else if *code == wasmparser::SectionCode::Element {
                     next_input = wasmparser::ParserInput::Default;
                 }
+                // else if *code == NAME {
+                //     // println!("code.name {} code.kind {}", name, kind );
+                //     data_copy = Some(Vec::new());
+                //     next_input = wasmparser::ParserInput::ReadSectionRawData;
+                // }                
                 else { 
                     println!("Skipping Section: {:?}", code);
                     next_input = wasmparser::ParserInput::SkipSection;
@@ -281,6 +293,15 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
                 func_table_entries = elements.clone();
             }
 
+            // wasmparser::ParserState::SectionRawData (ref data)=> {
+            //     println!("RAW {:?}", data);
+            //     data_copy.as_mut().unwrap().extend_from_slice(data);
+            //     println!("data {:?}", data_copy.clone().unwrap());
+            //     next_input = wasmparser::ParserInput::Default;
+            // }
+            // wasmparser::ParserState::NameSectionEntry(ref n) => {
+            //     println!("{:?}", n);
+            // }
             _ => {
                 println!("failed on:\n{:#?}", state);
                 unreachable!()
@@ -375,12 +396,15 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
 
     for reloc_sec in reloc_sections {
         if reloc_sec.name() == "reloc.CODE" {
+            println!("{:#?}", reloc_sec);
             for reloc_entry in reloc_sec.entries(){ //reloc.CODE
+            println!("code reloc entry {:?}",reloc_entry );
                 match reloc_entry {
                     RelocationEntry::FunctionIndexLeb {offset, index} => {//edge: func to func
                         let id = find_func_id(&func_entry_list, code_start_addr, offset);
                         let src = func_entry_list[id as usize].clone();
-                        let dst = func_entry_list[*index as usize].clone();
+                        let correct_index = read_index(offset, code_start_addr, &path);
+                        let dst = func_entry_list[correct_index as usize].clone();
                         //println!("offset {} is in {}",offset,  func_name_map.get(id).unwrap());
                         graph.add_edge(Node::Func(src), Node::Func(dst), 0); 
 
@@ -390,6 +414,7 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
                     RelocationEntry::MemoryAddressSleb {offset, index, addend} => {//edge: func to mem
                         let id = find_func_id(&func_entry_list, code_start_addr, offset);
                         // println!("offset {} is in {}\n{:#?}",offset,  id, reloc_entry);
+                        let _correct_index = read_index(offset, code_start_addr, &path);
                         let seg_id = find_seg_id(&data_entry_list, index, addend);
                         // println!("index {} is in seg {}", index, seg_id );
                         let src = func_entry_list[id as usize].clone();
@@ -402,8 +427,9 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
             } 
         } 
         else if reloc_sec.name() == "reloc.DATA" {
+            println!("{:#?}", reloc_sec);
             for reloc_entry in reloc_sec.entries() {
-                // println!("reloc.DATA {:#?}", reloc_entry );
+                println!("data reloc entry {:#?}", reloc_entry );
                 match reloc_entry {
                     RelocationEntry::MemoryAddressI32 {offset, index, addend} |
                     RelocationEntry::MemoryAddressLeb {offset, index, addend} |
@@ -507,6 +533,14 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
     Ok(())
 }
 
+fn read_index(offset: &u32, code_start: usize, path: &path::Path) -> u32 {
+    let index: u32;
+    let mut f = fs::File::open(path).unwrap();
+    //f.take((code_start+ (*offset as usize))as u64 );
+    f.seek(SeekFrom::Start( (code_start + (*offset as usize))as u64 ));
+    index = VarUint32::deserialize(&mut f).unwrap().into();
+    return index;
+}
 
 fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &mut HashSet<Node>, 
                     func_list: &Vec<FuncEntry>, func_name_map: &NameMap, data_list: &Vec<MemEntry>, env_dependant_funcs: &HashSet<u32>, is_lazy: bool) {
