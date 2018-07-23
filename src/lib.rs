@@ -414,12 +414,17 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
                     RelocationEntry::MemoryAddressSleb {offset, index, addend} => {//edge: func to mem
                         let id = find_func_id(&func_entry_list, code_start_addr, offset);
                         // println!("offset {} is in {}\n{:#?}",offset,  id, reloc_entry);
-                        let _correct_index = read_index(offset, code_start_addr, &path);
-                        let seg_id = find_seg_id(&data_entry_list, index, addend);
+                        let correct_index = read_index(offset, code_start_addr, &path);
+                        let seg_id = find_seg_id(&data_entry_list, &correct_index, addend);
                         // println!("index {} is in seg {}", index, seg_id );
-                        let src = func_entry_list[id as usize].clone();
-                        let dst = data_entry_list[seg_id as usize].clone();
-                        graph.add_edge(Node::Func(src), Node::Mem(dst), 0);
+                        if (seg_id > -1) { //instead of assertion in function!
+                            let src = func_entry_list[id as usize].clone();
+                            let dst = data_entry_list[seg_id as usize].clone();
+                            graph.add_edge(Node::Func(src), Node::Mem(dst), 0);
+                        }
+                        else {
+                            println!("some edges are skipped due to out of range offset {:#?}", reloc_entry);
+                        }
 
                     },
                     _ => ()
@@ -555,7 +560,6 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
     let mut match_func_id: HashMap<u32,u32> = HashMap::new();  //a map from old func id to new
     let mut imported_func_count: usize;
     
-    let global_section = module.global_section().unwrap();
 
 //type
     let type_section = module.type_section().unwrap();
@@ -572,7 +576,7 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
 //import
     let import_section = module.import_section().unwrap();
     imported_func_count = parse_import_section(&mut new_module, &import_section, &type_section);
-    // doing this here, because it maybe the caase that no import section be present, 
+    // doing this here, because it maybe the case that no import section be present, 
     // but we want to have import section in output anyways
     if !is_lazy {   //add lazy_roots
         imported_func_count = push_import_candidates_to_module(&module, &mut new_module, &lazy_nodes, func_name_map, imported_func_count, "lazy", &mut import_func_map);
@@ -592,16 +596,37 @@ match_func_id.extend(import_func_map.iter());
 
 
 //export
-    let export_section = module.export_section().unwrap();
+    //let export_section = module.export_section().unwrap();
     let mut exported_nodes: HashSet<Node> = HashSet::new();
-    let mut export_entries = parse_export_section(export_section, &lazy_nodes, func_list, data_list, &mut exported_nodes, &match_func_id, is_lazy);
+    let mut export_entries = match module.export_section() {
+        Some(export_section) => 
+        parse_export_section(export_section, &lazy_nodes, func_list, data_list, &mut exported_nodes, &match_func_id, is_lazy),
+        None => Vec::new(),
+    };
     if !is_lazy {
         export_entries.extend(push_export_candidates(export_candidates, &exported_nodes, func_name_map, &match_func_id));
+    }
+    else {  //export lazy nodes
+        export_entries.extend(push_export_candidates(lazy_nodes, &exported_nodes, func_name_map, &match_func_id));
     }
     for entry in export_entries {
         new_module.push_export(entry);
     }
 
+//global
+    //add stack poinrter as global
+    let global_stack = parity_wasm::elements::GlobalEntry::new(
+        parity_wasm::elements::GlobalType::new(parity_wasm::elements::ValueType::I32, true), 
+        parity_wasm::elements::InitExpr::new(vec![Instruction::I32Const(STACK_ADDR), Instruction::End]));
+    new_module = new_module.with_global(global_stack);
+    match module.global_section() {
+        Some(global_section) => {
+            for glob in global_section.entries() {
+                new_module = new_module.with_global(glob.clone());
+            }
+        }  
+        None => ()  
+    }
 ///////
 
     for sec in module.sections() {
@@ -631,27 +656,27 @@ match_func_id.extend(import_func_map.iter());
                 }
             }
             Section::Memory(mem) => {
-                if !is_lazy { //copy this memory section into main.wasm, lazy will import this; 
-                    memory_section = mem.clone();
+                // if !is_lazy {  
+                    memory_section = mem.clone();//copy this memory section into main.wasm and lazy
                     new_module = new_module.memory().build(); //just a dummy memory, to be replaced later by module's memory section
-                }
+                // }
             } 
-            Section::Global(glob_section) => {
-                // let global_entries = parse_global_section(&glob_section, &lazy_nodes, is_lazy);
-                // for glob in global_entries {
-                //     new_module = new_module.with_global(glob);
-                // }
-                // if !is_lazy { //add the stack pointer as global[0]
-                    let global_stack = parity_wasm::elements::GlobalEntry::new(
-                        parity_wasm::elements::GlobalType::new(parity_wasm::elements::ValueType::I32, true), 
-                        parity_wasm::elements::InitExpr::new(vec![Instruction::I32Const(STACK_ADDR), Instruction::End]));
-                    new_module= new_module.with_global(global_stack);
-                //     export_candidates.insert(Node::Global(GlobalEntry{index: 0}));
-                // }
-                for glob in glob_section.entries() {
-                    new_module = new_module.with_global(glob.clone());
-                }
-            }
+            // Section::Global(glob_section) => {
+            //     // let global_entries = parse_global_section(&glob_section, &lazy_nodes, is_lazy);
+            //     // for glob in global_entries {
+            //     //     new_module = new_module.with_global(glob);
+            //     // }
+            //     // if !is_lazy { //add the stack pointer as global[0]
+            //         let global_stack = parity_wasm::elements::GlobalEntry::new(
+            //             parity_wasm::elements::GlobalType::new(parity_wasm::elements::ValueType::I32, true), 
+            //             parity_wasm::elements::InitExpr::new(vec![Instruction::I32Const(STACK_ADDR), Instruction::End]));
+            //         new_module= new_module.with_global(global_stack);
+            //     //     export_candidates.insert(Node::Global(GlobalEntry{index: 0}));
+            //     // }
+            //     for glob in glob_section.entries() {
+            //         new_module = new_module.with_global(glob.clone());
+            //     }
+            // }
             Section::Table(tl) => {
                 table_section = tl.clone();
 
@@ -793,7 +818,7 @@ fn parse_import_section(new_module: &mut ModuleBuilder, import_section: &ImportS
 fn push_import_candidates_to_module(original_module: &Module, new_module: &mut ModuleBuilder, node_set: &HashSet<Node>,
                                     func_name_map: &NameMap, imported_func_num: usize, imp_module_name: &str, imported_map: &mut HashMap<u32, u32>) -> usize {
     //let mut out_list: Vec<ImportEntry> = Vec::new();
-    let global_section = original_module.global_section().unwrap();
+    // let global_section = original_module.global_section().unwrap();
     let function_section = original_module.function_section().unwrap();
     let function_section_entries = function_section.entries();
     let type_section = original_module.type_section().unwrap();
@@ -830,14 +855,14 @@ fn push_import_candidates_to_module(original_module: &Module, new_module: &mut M
                 //  out_list.push(import_entry.clone());
             }
             Node::Mem(_x) => { 
-                if memory_already_add {
-                    continue;
-                }
-                *import_entry.field_mut() = String::from("Memory_0");
-                *import_entry.external_mut() = parity_wasm::elements::External::Memory(
-                     parity_wasm::elements::MemoryType::new(16, None) );
-                new_module.push_import(import_entry);
-                memory_already_add = true;
+                // if memory_already_add {
+                //     continue;
+                // }
+                // *import_entry.field_mut() = String::from("Memory_0");
+                // *import_entry.external_mut() = parity_wasm::elements::External::Memory(
+                //      parity_wasm::elements::MemoryType::new(16, None) );
+                // new_module.push_import(import_entry);
+                // memory_already_add = true;
             }
             Node::Global(x) => { // having the same global section for both wasms, but check for stack pointer
 /*                let glob_entry = &global_section.entries()[x.index() as usize];
@@ -881,7 +906,7 @@ fn parse_export_section(export_section: &ExportSection, lazy_nodes: &HashSet<Nod
                 node = Node::Func(func_list[*x as usize]); //to be checked in laze_nodes
                 let new_id = match match_func_id.get(x) {
                     Some(id) => *id,
-                    None => 66666
+                    None => 66666 //>>>???? when I don't have a map for the new id?
                 };
                 *new_export.internal_mut() = parity_wasm::elements::Internal::Function(new_id);
             },
@@ -930,15 +955,17 @@ fn push_export_candidates(candidates: &HashSet<Node>, exported_nodes: &HashSet<N
             Node::Func(x) => {
                 *exp_entry.field_mut() = func_name_map.get((*x).id()).unwrap().to_string();//String::from("Func_export");
                 *exp_entry.internal_mut() = parity_wasm::elements::Internal::Function((*x).id());
+                out_list.push(exp_entry.clone());
             }
-            Node::Mem(_x) => {
-                if already_exported_mem {
-                    continue;
-                }
-                *exp_entry.field_mut() = format!("Memory_{}", counter);//String::from("Memory");
-                // counter += 1;
-                *exp_entry.internal_mut() = parity_wasm::elements::Internal::Memory(0); //just memory 0   
-                already_exported_mem = true;
+            Node::Mem(_x) => {  //no need to process memory, it will be cloned into main and lazy
+                // if already_exported_mem {
+                //     continue;
+                // }
+                // *exp_entry.field_mut() = format!("Memory_{}", counter);//String::from("Memory");
+                // // counter += 1;
+                // *exp_entry.internal_mut() = parity_wasm::elements::Internal::Memory(0); //just memory 0   
+                // already_exported_mem = true;
+                // out_list.push(exp_entry.clone());
             }
             Node::Global(x) => {
                 if already_exported_global.contains(&(*x).index()) || (*x).index() == 0 { //skip on stack pointer as well
@@ -948,13 +975,15 @@ fn push_export_candidates(candidates: &HashSet<Node>, exported_nodes: &HashSet<N
                 counter += 1;
                 *exp_entry.internal_mut() = parity_wasm::elements::Internal::Global((*x).index() );                
                 already_exported_global.insert((*x).index());
+                out_list.push(exp_entry.clone());
             }
             Node::Table(x) => {
                 *exp_entry.field_mut() = String::from("Table_export");
-                *exp_entry.internal_mut() = parity_wasm::elements::Internal::Table(0); // just table 0               
+                *exp_entry.internal_mut() = parity_wasm::elements::Internal::Table(0); // just table 0 
+                out_list.push(exp_entry.clone());              
             }
         }
-        out_list.push(exp_entry.clone());
+        
     }
     return out_list;
 }
