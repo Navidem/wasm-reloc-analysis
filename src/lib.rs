@@ -579,7 +579,7 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
     // doing this here, because it maybe the case that no import section be present, 
     // but we want to have import section in output anyways
     if !is_lazy {   //add lazy_roots
-        imported_func_count = push_import_candidates_to_module(&module, &mut new_module, &lazy_nodes, func_name_map, imported_func_count, "lazy", &mut import_func_map);
+        // imported_func_count = push_import_candidates_to_module(&module, &mut new_module, &lazy_nodes, func_name_map, imported_func_count, "lazy", &mut import_func_map);
     }
     else {  // add nodes from main.wasm
         imported_func_count = push_import_candidates_to_module(&module, &mut new_module, &export_candidates, func_name_map, imported_func_count, "main", &mut import_func_map);
