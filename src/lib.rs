@@ -187,7 +187,9 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
                 func_entry_list.push(
                     FuncEntry{id: func_id_counter, index: -1, start: 0, end: 0}   //special case of functions (imported)
                 );
-                env_funcs_set.insert(func_id_counter);
+                if imp.module() == "env"{
+                    env_funcs_set.insert(func_id_counter);
+                }
                 func_id_counter += 1;
             }
             _ => (),
@@ -358,12 +360,20 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
         non_lazy_roots.insert(
             Node::Func(func_entry_list[entry as usize])
         );
+        println!("Table Entry: {} = {:?}",entry, func_name_map.get(entry as u32) )
     }
     for entry in exported_global_indexes {
         non_lazy_roots.insert(
             Node::Global(GlobalEntry{index: entry})
         );
     }
+    // manually insery __run__ as non_lazy_root
+    let run_func_index = *func_id_map.get("__run__").unwrap();
+    let dummy_func_index = *func_id_map.get("__dummy__").unwrap(); 
+    non_lazy_roots.insert(Node::Func(func_entry_list[run_func_index as usize]));
+    //just incase if __dummy__ is there
+    non_lazy_roots.remove(&Node::Func(func_entry_list[dummy_func_index as usize]));
+
     let mut dl_export_candidates: HashSet<Node> = HashSet::new(); // keep track of export candidates from main wasm
     for lazy in lazy_roots.iter() {
         non_lazy_roots.remove(lazy);
@@ -394,14 +404,20 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
         }
     }
 
+    //inserting it here, to be later skipped in splitter
+    env_dependant_funcs.insert(dummy_func_index as u32);
+
     for reloc_sec in reloc_sections {
         if reloc_sec.name() == "reloc.CODE" {
-            println!("{:#?}", reloc_sec);
+            // println!("{:#?}", reloc_sec);
             for reloc_entry in reloc_sec.entries(){ //reloc.CODE
-            println!("code reloc entry {:?}",reloc_entry );
+            // println!("code reloc entry {:?}",reloc_entry );
                 match reloc_entry {
                     RelocationEntry::FunctionIndexLeb {offset, index} => {//edge: func to func
                         let id = find_func_id(&func_entry_list, code_start_addr, offset);
+                        if id == dummy_func_index {
+                            continue;
+                        }
                         let src = func_entry_list[id as usize].clone();
                         let correct_index = read_index(offset, code_start_addr, &path);
                         let dst = func_entry_list[correct_index as usize].clone();
@@ -413,6 +429,9 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
                     RelocationEntry::MemoryAddressLeb {offset, index, addend} |
                     RelocationEntry::MemoryAddressSleb {offset, index, addend} => {//edge: func to mem
                         let id = find_func_id(&func_entry_list, code_start_addr, offset);
+                        if id == dummy_func_index {
+                            continue;
+                        }                        
                         // println!("offset {} is in {}\n{:#?}",offset,  id, reloc_entry);
                         let correct_index = read_index(offset, code_start_addr, &path);
                         let seg_id = find_seg_id(&data_entry_list, &correct_index, addend);
@@ -432,9 +451,9 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
             } 
         } 
         else if reloc_sec.name() == "reloc.DATA" {
-            println!("{:#?}", reloc_sec);
+            // println!("{:#?}", reloc_sec);
             for reloc_entry in reloc_sec.entries() {
-                println!("data reloc entry {:#?}", reloc_entry );
+                // println!("data reloc entry {:#?}", reloc_entry );
                 match reloc_entry {
                     RelocationEntry::MemoryAddressI32 {offset, index, addend} |
                     RelocationEntry::MemoryAddressLeb {offset, index, addend} |
@@ -532,8 +551,8 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
 
 
     //////////////////
-    build_wasm(&module, &lazy_exclusive_reachable, &mut dl_export_candidates, &func_entry_list, &func_name_map, &data_entry_list, &env_dependant_funcs, false);//main
-    build_wasm(&module, &lazy_exclusive_reachable, &mut dl_export_candidates, &func_entry_list, &func_name_map, &data_entry_list, &env_dependant_funcs, true);//lazy
+    build_wasm(&module, &lazy_exclusive_reachable, &mut dl_export_candidates, &func_entry_list, &func_name_map, &data_entry_list, &env_dependant_funcs, run_func_index, false);//main
+    build_wasm(&module, &lazy_exclusive_reachable, &mut dl_export_candidates, &func_entry_list, &func_name_map, &data_entry_list, &env_dependant_funcs, 0, true);//lazy
     /////////////^^^^^ doing the division!
     Ok(())
 }
@@ -548,7 +567,7 @@ fn read_index(offset: &u32, code_start: usize, path: &path::Path) -> u32 {
 }
 
 fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &mut HashSet<Node>, 
-                    func_list: &Vec<FuncEntry>, func_name_map: &NameMap, data_list: &Vec<MemEntry>, env_dependant_funcs: &HashSet<u32>, is_lazy: bool) {
+                    func_list: &Vec<FuncEntry>, func_name_map: &NameMap, data_list: &Vec<MemEntry>, env_dependant_funcs: &HashSet<u32>, old_run_id: u32, is_lazy: bool) {
     let mut new_module = ModuleBuilder::new();
     let function_section = module.function_section().unwrap();
     let mut memory_section: MemorySection = MemorySection::default();
@@ -587,8 +606,8 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
 
 match_func_id.extend(import_func_map.iter());
 //code
-    let code_section = module.code_section().unwrap();
-    let funcs = parse_code_section(code_section, type_section, function_section, &lazy_nodes, &func_list, 
+    // let code_section = module.code_section().unwrap();
+    let funcs = parse_code_section(module, &lazy_nodes, &func_list, 
                     &mut match_func_id, imported_func_count, env_dependant_funcs, is_lazy);
     for func in funcs {
         new_module.push_function(func);
@@ -601,10 +620,14 @@ match_func_id.extend(import_func_map.iter());
     let mut export_entries = match module.export_section() {
         Some(export_section) => 
         parse_export_section(export_section, &lazy_nodes, func_list, data_list, &mut exported_nodes, &match_func_id, is_lazy),
-        None => Vec::new(),
+        None => Vec::new(), //there were no export section!
     };
     if !is_lazy {
         export_entries.extend(push_export_candidates(export_candidates, &exported_nodes, func_name_map, &match_func_id));
+        //manually export __run__
+        let new_run_id = *match_func_id.get(&old_run_id).unwrap();
+        let run_exp_entry = parity_wasm::elements::ExportEntry::new(String::from("__run__"), parity_wasm::elements::Internal::Function(new_run_id));   
+        export_entries.extend(vec![run_exp_entry]);     
     }
     else {  //export lazy nodes
         export_entries.extend(push_export_candidates(lazy_nodes, &exported_nodes, func_name_map, &match_func_id));
@@ -689,6 +712,11 @@ match_func_id.extend(import_func_map.iter());
             Section::Element(el) => { //this section needs attention: for each entry if the func is in export_candidate, keep it with new id
                 if !is_lazy { // copy into main.wasm
                     element_section = el.clone();
+                    for elem_entry in element_section.entries_mut() {
+                        for member in elem_entry.members_mut() {
+                            *member = *match_func_id.get(member).unwrap();
+                        }
+                    }
                 }
                 else {  //for lazy.wasm keep it empty!
                     // parity_wasm::elements::ElementSegment::new(0, , vec![]);
@@ -728,8 +756,10 @@ match_func_id.extend(import_func_map.iter());
             _ => (), //TODO others
         }
     }
-
-
+println!("printing func id map {}", is_lazy );
+for key in match_func_id.keys() {
+    println!("old: {} new: {}", key, match_func_id.get(key).unwrap() );
+}
         
     let mut out_mod = new_module.build();
     //post processing sections: memory, table, element
@@ -783,7 +813,7 @@ fn parse_import_section(new_module: &mut ModuleBuilder, import_section: &ImportS
     for entry in import_section.entries() {    //add any importEntry from original module
                 // import_entries.push(entry.clone());
     let mut entry_clone = entry.clone();
-    if entry.module() == "env" { //skip any env import
+    if entry.module() == "env"{ //skip any env import
         continue;
     }
     match entry.external() {
@@ -938,6 +968,11 @@ fn parse_export_section(export_section: &ExportSection, lazy_nodes: &HashSet<Nod
         }
         seen_name.insert(export_name.to_string());
     }
+    if !is_lazy && !seen_name.contains("table") {
+        let table_entry = parity_wasm::elements::ExportEntry::new("table".to_string(), parity_wasm::elements::Internal::Table(0));
+        out_list.push(table_entry);
+        exported_nodes.insert(Node::Table(TableEntry{index: 0}));
+    }
     return out_list;
 }
 fn push_export_candidates(candidates: &HashSet<Node>, exported_nodes: &HashSet<Node>, func_name_map: &NameMap, match_func_id: &HashMap<u32,u32>)
@@ -953,8 +988,10 @@ fn push_export_candidates(candidates: &HashSet<Node>, exported_nodes: &HashSet<N
         let mut exp_entry = parity_wasm::elements::ExportEntry::new(String::from(""), parity_wasm::elements::Internal::Function(0));
         match entry {
             Node::Func(x) => {
-                *exp_entry.field_mut() = func_name_map.get((*x).id()).unwrap().to_string();//String::from("Func_export");
-                *exp_entry.internal_mut() = parity_wasm::elements::Internal::Function((*x).id());
+                let old_id = (*x).id();
+                let new_id = *match_func_id.get(&old_id).unwrap();
+                *exp_entry.field_mut() = func_name_map.get(old_id).unwrap().to_string();//String::from("Func_export");
+                *exp_entry.internal_mut() = parity_wasm::elements::Internal::Function(new_id);
                 out_list.push(exp_entry.clone());
             }
             Node::Mem(_x) => {  //no need to process memory, it will be cloned into main and lazy
@@ -1024,9 +1061,13 @@ fn parse_data_section(data_sectoin: &DataSection, lazy_nodes: &HashSet<Node>, da
     }
     return out_list;
 }
-fn parse_code_section(code: &CodeSection, type_section: &TypeSection, function_section: &FunctionSection,
+fn parse_code_section(module: &Module,//code: &CodeSection, type_section: &TypeSection, function_section: &FunctionSection,
                     lazy_nodes: &HashSet<Node>, func_list: &Vec<FuncEntry>, match_func_id: &mut HashMap<u32,u32>, 
                     new_imported_count: usize, env_dependant_funcs: &HashSet<u32>, is_lazy: bool) -> Vec<FunctionDefinition> {
+    let code = module.code_section().unwrap();
+    let type_section = module.type_section().unwrap();
+    let function_section = module.function_section().unwrap();
+// code_section, type_section, function_section
     let mut out_list: Vec<FunctionDefinition> = Vec::new();
     let ttyy = type_section.types();
     let funcs = function_section.entries();
