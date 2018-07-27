@@ -14,7 +14,7 @@ use byteorder::{LittleEndian, ByteOrder};
 use parity_wasm::elements::{Deserialize, CodeSection, RelocSection, ExportSection, NameSection, 
 ModuleNameSection, FunctionNameSection, MemorySection, DataSection, RelocationEntry, CustomSection,
 TypeSection, FunctionSection, DataSegment, GlobalSection, TableSection, ElementSection, ImportSection,
-NameMap,
+NameMap, IndexMap,
 Instruction, FuncBody, ImportEntry, Internal, Module, Section, Serialize, VarUint32, VarUint7};
 use parity_wasm::builder::*;
 
@@ -187,9 +187,9 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
                 func_entry_list.push(
                     FuncEntry{id: func_id_counter, index: -1, start: 0, end: 0}   //special case of functions (imported)
                 );
-                if imp.module() == "env"{
-                    env_funcs_set.insert(func_id_counter);
-                }
+                // if imp.module() == "env"{
+                //     env_funcs_set.insert(func_id_counter);
+                // }
                 func_id_counter += 1;
             }
             _ => (),
@@ -568,7 +568,8 @@ fn read_index(offset: &u32, code_start: usize, path: &path::Path) -> u32 {
 
 fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &mut HashSet<Node>, 
                     func_list: &Vec<FuncEntry>, func_name_map: &NameMap, data_list: &Vec<MemEntry>, env_dependant_funcs: &HashSet<u32>, old_run_id: u32, is_lazy: bool) {
-    let mut new_module = ModuleBuilder::new();
+    let mod_name = module.clone().parse_names().unwrap();
+    let mut new_module = ModuleBuilder::new(); //parity_wasm::builder::from_module(mod_name.clone());///
     let function_section = module.function_section().unwrap();
     let mut memory_section: MemorySection = MemorySection::default();
     let mut table_section: TableSection = TableSection::default();
@@ -576,6 +577,15 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
     let mut import_func_map: HashMap<u32, u32> = HashMap::new();
     //let mut imported_func_num: u32 = 0;
 
+    let name_section = mod_name.names_section().unwrap();
+    let mut func_name_section = FunctionNameSection::default();
+    match name_section {
+        NameSection::Function(x) => func_name_section = x.clone(),
+        _ => (),
+    }
+
+    let  name_index_map = func_name_section.names(); //used for name section construction
+    let mut new_name_index_map = IndexMap::<String>::default();
     let mut match_func_id: HashMap<u32,u32> = HashMap::new();  //a map from old func id to new
     let mut imported_func_count: usize;
     
@@ -604,11 +614,11 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
         imported_func_count = push_import_candidates_to_module(&module, &mut new_module, &export_candidates, func_name_map, imported_func_count, "main", &mut import_func_map);
     }
 
-match_func_id.extend(import_func_map.iter());
+    match_func_id.extend(import_func_map.iter());
 //code
     // let code_section = module.code_section().unwrap();
     let funcs = parse_code_section(module, &lazy_nodes, &func_list, 
-                    &mut match_func_id, imported_func_count, env_dependant_funcs, is_lazy);
+                    &mut match_func_id, imported_func_count, env_dependant_funcs, &name_index_map, &mut new_name_index_map, is_lazy);
     for func in funcs {
         new_module.push_function(func);
     }
@@ -624,10 +634,12 @@ match_func_id.extend(import_func_map.iter());
     };
     if !is_lazy {
         export_entries.extend(push_export_candidates(export_candidates, &exported_nodes, func_name_map, &match_func_id));
-        //manually export __run__
+        //manually export __run__ and Memory
         let new_run_id = *match_func_id.get(&old_run_id).unwrap();
         let run_exp_entry = parity_wasm::elements::ExportEntry::new(String::from("__run__"), parity_wasm::elements::Internal::Function(new_run_id));   
-        export_entries.extend(vec![run_exp_entry]);     
+        let mem_exp_entry = parity_wasm::elements::ExportEntry::new(String::from("memory"), parity_wasm::elements::Internal::Memory(0)); 
+        //^^ better to be logged in exported_nodes as well
+        export_entries.extend(vec![run_exp_entry, mem_exp_entry]);     
     }
     else {  //export lazy nodes
         export_entries.extend(push_export_candidates(lazy_nodes, &exported_nodes, func_name_map, &match_func_id));
@@ -651,27 +663,18 @@ match_func_id.extend(import_func_map.iter());
         None => ()  
     }
 ///////
+println!("printing new index map" );
+for ent in new_name_index_map.iter() {
+    println!("{:?}", ent );
+}
+// let mut new_name_index_map = Some(new_name_index_map);
+let mut new_func_name_section = FunctionNameSection::default();
+*new_func_name_section.names_mut() = new_name_index_map;
+let new_name_section = NameSection::Function(new_func_name_section);
+let mut new_name_section = Some(new_name_section);
 
     for sec in module.sections() {
         match sec {
-            // Section::Type(type_section) => { //copy all entries of Type into output file, for the sake of indirect calls
-            //     for type_entry in type_section.types() {
-            //         let func_type = match type_entry {
-            //             parity_wasm::elements::Type::Function(ref x) => x,
-            //         };
-            //         let params = func_type.params().to_vec();
-            //         let return_type = func_type.return_type();
-            //         let sig = signature().with_params(params).with_return_type(return_type).build_sig();  
-            //         new_module.push_signature(sig);                  
-            //     }
-            // }
-            // Section::Code(code_section) => {    //if func in non lazy, make a func and add
-            //     let funcs = parse_code_section(code_section, type_section, function_section, &lazy_nodes, &func_list, 
-            //                     &mut match_func_id, new_imported_count, is_lazy);
-            //     for func in funcs {
-            //         new_module.push_function(func);
-            //     }
-            // }
             Section::Data(data_section) => {
                 let data_segments = parse_data_section(data_section, &lazy_nodes, &data_list, is_lazy);
                 for seg in data_segments {
@@ -684,22 +687,7 @@ match_func_id.extend(import_func_map.iter());
                     new_module = new_module.memory().build(); //just a dummy memory, to be replaced later by module's memory section
                 // }
             } 
-            // Section::Global(glob_section) => {
-            //     // let global_entries = parse_global_section(&glob_section, &lazy_nodes, is_lazy);
-            //     // for glob in global_entries {
-            //     //     new_module = new_module.with_global(glob);
-            //     // }
-            //     // if !is_lazy { //add the stack pointer as global[0]
-            //         let global_stack = parity_wasm::elements::GlobalEntry::new(
-            //             parity_wasm::elements::GlobalType::new(parity_wasm::elements::ValueType::I32, true), 
-            //             parity_wasm::elements::InitExpr::new(vec![Instruction::I32Const(STACK_ADDR), Instruction::End]));
-            //         new_module= new_module.with_global(global_stack);
-            //     //     export_candidates.insert(Node::Global(GlobalEntry{index: 0}));
-            //     // }
-            //     for glob in glob_section.entries() {
-            //         new_module = new_module.with_global(glob.clone());
-            //     }
-            // }
+
             Section::Table(tl) => {
                 table_section = tl.clone();
 
@@ -723,44 +711,26 @@ match_func_id.extend(import_func_map.iter());
                     // element_section = ElementSection::with_entries(vec![dummy_elem_entry]);
                 }
             }
-            // Section::Export(export_section) => {
-            //     let mut exported_nodes: HashSet<Node> = HashSet::new();
-            //     let mut export_entries = parse_export_section(export_section, &lazy_nodes, func_list, data_list, &mut exported_nodes, is_lazy);
-            //     if !is_lazy {
-            //         export_entries.extend(push_export_candidates(export_candidates, &exported_nodes, func_name_map));
-            //     }
-            //     // else { //export lazy nodes, already is added in parse_export_section
-            //     //     export_entries.extend(push_candidates(lazy_nodes));
-            //     // }
-            //     for entry in export_entries {
-            //         new_module.push_export(entry);
-            //     }
-            // }
-            // Section::Import(import_section) => {
-            //     // let mut import_entries: Vec<ImportEntry> = Vec::new();
-            //     imported_func_num = parse_import_section(&mut new_module, &import_section, &type_section);
-            //     // for entry in import_section.entries() {    //add any importEntry from original module
-            //     //     // import_entries.push(entry.clone());
-            //     //     match entry.external() {
-            //     //         parity_wasm::elements::External::Function(_) => imported_func_num += 1,
-            //     //         _ => (),
-            //     //     }
-            //     //     new_module.push_import(entry.clone());
-            //     // }
+            Section::Custom(x) => {
+                if x.name() == "name" {
+                    // println!("{:?}", x);
+                    let mut custom = CustomSection::default();
+                    *custom.name_mut() = "name".to_string();
+                    if let Some(y) = new_name_section.take(){
+                        y.serialize(custom.payload_mut());
+                    }
 
-            //     // for imp in import_entries {
-            //     //     new_module.push_import(imp);
-            //     // }
-
-            // }
+                    let new_custom = Section::Custom(custom);
+                    new_module = new_module.with_section(new_custom);
+                    // new_module = new_module.with_section(sec.clone());
+                }
+            }
             _ => (), //TODO others
         }
     }
-println!("printing func id map {}", is_lazy );
-for key in match_func_id.keys() {
-    println!("old: {} new: {}", key, match_func_id.get(key).unwrap() );
-}
-        
+
+
+
     let mut out_mod = new_module.build();
     //post processing sections: memory, table, element
     for sec in out_mod.sections_mut() {
@@ -813,7 +783,10 @@ fn parse_import_section(new_module: &mut ModuleBuilder, import_section: &ImportS
     for entry in import_section.entries() {    //add any importEntry from original module
                 // import_entries.push(entry.clone());
     let mut entry_clone = entry.clone();
-    if entry.module() == "env"{ //skip any env import
+    // if entry.module() == "env"{ //skip any env import
+    //     continue;
+    // }
+    if entry.field() == "__stack_pointer" { //skip importing mutable global
         continue;
     }
     match entry.external() {
@@ -1063,7 +1036,8 @@ fn parse_data_section(data_sectoin: &DataSection, lazy_nodes: &HashSet<Node>, da
 }
 fn parse_code_section(module: &Module,//code: &CodeSection, type_section: &TypeSection, function_section: &FunctionSection,
                     lazy_nodes: &HashSet<Node>, func_list: &Vec<FuncEntry>, match_func_id: &mut HashMap<u32,u32>, 
-                    new_imported_count: usize, env_dependant_funcs: &HashSet<u32>, is_lazy: bool) -> Vec<FunctionDefinition> {
+                    new_imported_count: usize, env_dependant_funcs: &HashSet<u32>, name_index_map: &IndexMap<String>,
+                    new_name_index_map: &mut IndexMap<String>, is_lazy: bool) -> Vec<FunctionDefinition> {
     let code = module.code_section().unwrap();
     let type_section = module.type_section().unwrap();
     let function_section = module.function_section().unwrap();
@@ -1105,6 +1079,9 @@ fn parse_code_section(module: &Module,//code: &CodeSection, type_section: &TypeS
                 let sig = signature().with_params(params).with_return_type(return_type).build_sig();                
                 let func = function().with_signature(sig).with_body(func_body.clone()).build();
                 out_list.push(func);
+                //update indexMap
+                let name = (name_index_map.get(old_id as u32).unwrap());
+                new_name_index_map.insert(new_id as u32, name.to_string());
             }
             added_func_num += 1;
             match_func_id.insert(old_id as u32, new_id as u32); //to be used for Export section
