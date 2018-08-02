@@ -608,6 +608,16 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
         let sig = signature().with_params(params).with_return_type(return_type).build_sig();  
         new_module.push_signature(sig);                  
     }
+//data
+    let mut new_data_size: usize = 0;
+    let data_section = module.data_section().unwrap();
+    let data_segments = parse_data_section(data_section, &lazy_nodes, &data_list, is_lazy);
+    for seg in data_segments {
+        new_data_size += seg.value().len(); //counting the size of data segment
+        new_module = new_module.with_data_segment(seg);  
+    }
+
+    let min_mem_size = ((STACK_ADDR + new_data_size as i32) as f64 / PAGE_SIZE as f64).ceil() as u32;
 
 //import
     let import_section = module.import_section().unwrap();
@@ -617,7 +627,12 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
     if !is_lazy {   //add lazy_roots
         // imported_func_count = push_import_candidates_to_module(&module, &mut new_module, &lazy_nodes, func_name_map, imported_func_count, "lazy", &mut import_func_map);
     }
-    else {  // add nodes from main.wasm
+    else {  // add nodes from main.wasm and main.memory
+
+        let external = parity_wasm::elements::External::Memory(parity_wasm::elements::MemoryType::new(min_mem_size, None) );
+        let import_entry = parity_wasm::elements::ImportEntry::new(String::from("main"), String::from("memory"), external);
+        new_module.push_import(import_entry);
+
         imported_func_count = push_import_candidates_to_module(&module, &mut new_module, &export_candidates, func_name_map, imported_func_count, "main", &mut import_func_map);
     }
 
@@ -673,14 +688,7 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
         None => ()  
     }
 
-//data
-    let mut new_data_size: usize = 0;
-    let data_section = module.data_section().unwrap();
-    let data_segments = parse_data_section(data_section, &lazy_nodes, &data_list, is_lazy);
-    for seg in data_segments {
-        new_data_size += seg.value().len(); //counting the size of data segment
-        new_module = new_module.with_data_segment(seg);  
-    }
+
 ///////
 println!("printing new index map" );
 for ent in new_name_index_map.iter() {
@@ -702,12 +710,13 @@ let mut new_name_section = Some(new_name_section);
             //     // }
             // }
             Section::Memory(mem) => {
-                // if !is_lazy {  
+                if !is_lazy {   // for  lazy we import the memory section
                     memory_section = mem.clone();//copy this memory section into main.wasm and lazy
-                    let min_mem_size = ((STACK_ADDR + new_data_size as i32) as f64 / PAGE_SIZE as f64).ceil() as u32;
-                    let mem_type =  parity_wasm::elements::MemoryType::new(min_mem_size, None);
-                    *memory_section.entries_mut() = vec![mem_type];
-                    new_module = new_module.memory().build(); //just a dummy memory, to be replaced later by module's memory section
+                    
+                        let mem_type =  parity_wasm::elements::MemoryType::new(min_mem_size, None);
+                        *memory_section.entries_mut() = vec![mem_type];
+                        new_module = new_module.memory().build(); //just a dummy memory, to be replaced later by module's memory section
+                    }
                 // }
             } 
 
@@ -891,11 +900,12 @@ fn push_import_candidates_to_module(original_module: &Module, new_module: &mut M
                 // if memory_already_add {
                 //     continue;
                 // }
-                // *import_entry.field_mut() = String::from("Memory_0");
+                // *import_entry.field_mut() = String::from("memory");
                 // *import_entry.external_mut() = parity_wasm::elements::External::Memory(
                 //      parity_wasm::elements::MemoryType::new(16, None) );
                 // new_module.push_import(import_entry);
                 // memory_already_add = true;
+                // *memory_imported = true;
             }
             Node::Global(x) => { // having the same global section for both wasms, but check for stack pointer
 /*                let glob_entry = &global_section.entries()[x.index() as usize];
@@ -1052,15 +1062,17 @@ fn parse_data_section(data_sectoin: &DataSection, lazy_nodes: &HashSet<Node>, da
     let segments = data_sectoin.entries(); 
 
     for (idx, seg) in segments.iter().enumerate() { // is_lazy XNOR contains
-        if (!is_lazy && !lazy_nodes.contains(&Node::Mem(data_list[idx]))) || 
-         (is_lazy && lazy_nodes.contains(&Node::Mem(data_list[idx]))) {
-            out_list.push(seg.clone());
-        }
-        else { // is in lazy list: should be NOP, as the initilizer uses it
-            let dummy_expr = parity_wasm::elements::InitExpr::new(vec![Instruction::I32Const(0) ,Instruction::End]);
-            let dummy_seg = DataSegment::new(seg.index(), dummy_expr, vec![]);
-            out_list.push(dummy_seg);
-        }
+        // if (!is_lazy && !lazy_nodes.contains(&Node::Mem(data_list[idx]))) || 
+        //  (is_lazy && lazy_nodes.contains(&Node::Mem(data_list[idx]))) {
+        //     out_list.push(seg.clone());
+        // }
+        // else { // is in lazy list: should be NOP, as the initilizer uses it
+        //     let dummy_expr = parity_wasm::elements::InitExpr::new(vec![Instruction::I32Const(0) ,Instruction::End]);
+        //     let dummy_seg = DataSegment::new(seg.index(), dummy_expr, vec![]);
+        //     out_list.push(dummy_seg);
+        // }
+        out_list.push(seg.clone());     //just copy over the data segments
+
     }
     return out_list;
 }
