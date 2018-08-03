@@ -557,8 +557,12 @@ pub fn run_reloc_analysis() -> Result<(), Box<std::error::Error>>{
 
 
     //////////////////
-    build_wasm(&module, &lazy_exclusive_reachable, &mut dl_export_candidates, &func_entry_list, &func_name_map, &data_entry_list, &env_dependant_funcs, run_func_index, callback_func_index, lazy_func_num, false);//main
-    build_wasm(&module, &lazy_exclusive_reachable, &mut dl_export_candidates, &func_entry_list, &func_name_map, &data_entry_list, &env_dependant_funcs, 0, 0, lazy_func_num, true);//lazy
+    // let mut main_match_func_id: HashMap<u32,u32> = HashMap::new();  //a map from old func id to new
+
+    build_wasm(&module, &lazy_exclusive_reachable, &mut dl_export_candidates, &func_entry_list, &func_name_map, &data_entry_list, &env_dependant_funcs, 
+        run_func_index, callback_func_index, lazy_func_num, false);//main
+    build_wasm(&module, &lazy_exclusive_reachable, &mut dl_export_candidates, &func_entry_list, &func_name_map, &data_entry_list, &env_dependant_funcs, 
+        0, 0, lazy_func_num, true);//lazy
     /////////////^^^^^ doing the division!
     Ok(())
 }
@@ -583,6 +587,8 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
     let mut element_section: ElementSection = ElementSection::default();
     let mut import_func_map: HashMap<u32, u32> = HashMap::new();
     //let mut imported_func_num: u32 = 0;
+    let mut match_func_id: HashMap<u32,u32> = HashMap::new();  //a map from old func id to new
+
 
     let name_section = mod_name.names_section().unwrap();
     let mut func_name_section = FunctionNameSection::default();
@@ -593,9 +599,11 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
 
     let  name_index_map = func_name_section.names(); //used for name section construction
     let mut new_name_index_map = IndexMap::<String>::default();
-    let mut match_func_id: HashMap<u32,u32> = HashMap::new();  //a map from old func id to new
     let mut imported_func_count: usize;
     
+    //parse element section, and add any entry to be exported by main and imported by lazy
+    let elem_nodes = log_element_section(&module, &func_list);
+    export_candidates.extend(elem_nodes);
 
 //type
     let type_section = module.type_section().unwrap();
@@ -613,8 +621,10 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
     let data_section = module.data_section().unwrap();
     let data_segments = parse_data_section(data_section, &lazy_nodes, &data_list, is_lazy);
     for seg in data_segments {
-        new_data_size += seg.value().len(); //counting the size of data segment
         new_module = new_module.with_data_segment(seg);  
+    }
+    for seg in data_section.entries() {
+        new_data_size += seg.value().len(); //counting the size of data segment
     }
 
     let min_mem_size = ((STACK_ADDR + new_data_size as i32) as f64 / PAGE_SIZE as f64).ceil() as u32;
@@ -655,7 +665,7 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
         None => Vec::new(), //there were no export section!
     };
     if !is_lazy {
-        export_entries.extend(push_export_candidates(export_candidates, &exported_nodes, func_name_map, &match_func_id));
+        export_entries.extend(push_export_candidates(export_candidates, &mut exported_nodes, func_name_map, &match_func_id));
         //manually export __run__ and Memory and run_load_callback()
         let new_run_id = *match_func_id.get(&old_run_id).unwrap();
         let new_callback_id = *match_func_id.get(&old_callback_id).unwrap();
@@ -667,7 +677,7 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
         export_entries.extend(vec![run_exp_entry, callback_exp_entry, mem_exp_entry, tbl_exp_entry]);     
     }
     else {  //export lazy nodes
-        export_entries.extend(push_export_candidates(lazy_nodes, &exported_nodes, func_name_map, &match_func_id));
+        export_entries.extend(push_export_candidates(lazy_nodes, &mut exported_nodes, func_name_map, &match_func_id));
     }
     for entry in export_entries {
         new_module.push_export(entry);
@@ -735,18 +745,25 @@ let mut new_name_section = Some(new_name_section);
                 new_module.push_table(tl_def); //this adds a dummy table and element section to be replaced later
             }
             Section::Element(el) => { //this section needs attention: for each entry if the func is in export_candidate, keep it with new id
-                if !is_lazy { // copy into main.wasm
                     element_section = el.clone();
-                    for elem_entry in element_section.entries_mut() {
-                        for member in elem_entry.members_mut() {
-                            *member = *match_func_id.get(member).unwrap();
+                    // if !is_lazy { // copy into main.wasm
+                        for elem_entry in element_section.entries_mut() {
+                            for member in elem_entry.members_mut() {
+                                *member = *match_func_id.get(member).unwrap();
+                            }
                         }
-                    }
-                }
-                else {  //for lazy.wasm keep it empty!
-                    // parity_wasm::elements::ElementSegment::new(0, , vec![]);
-                    // element_section = ElementSection::with_entries(vec![dummy_elem_entry]);
-                }
+                // }
+                // else {  //is lazy
+                //     for elem_entry in element_section.entries_mut() {
+                //         for member in elem_entry.members_mut() {
+                //             *member = match match_func_id.get(member) {
+                //                 Some(x) => *x,
+                //                 None => *main_match_func_id.get(member).unwrap()
+                //             }
+                            
+                //         }
+                //     }                    
+                // }
             }
             Section::Custom(x) => {
                 if x.name() == "name" {
@@ -797,6 +814,9 @@ for ent in match_func_id.iter() {
             _ => ()
         }
     }
+    // if !is_lazy {
+    //     *main_match_func_id = match_func_id.clone();
+    // }
     let wasm_bytes = parity_wasm::serialize(out_mod).unwrap();
     let wasm_path = if is_lazy {
             path::Path::new("lazy.wasm")
@@ -815,6 +835,17 @@ for ent in match_func_id.iter() {
         Ok(_) => (),
     }
 
+}
+
+fn log_element_section(module: &Module, func_entry_list: &Vec<FuncEntry>) -> HashSet<Node> {
+    let element_section = module.elements_section().unwrap();
+    let mut node_log: HashSet<Node> = HashSet::new();
+    for seg in element_section.entries() {
+        for member in seg.members() {
+            node_log.insert(Node::Func(func_entry_list[*member as usize]));
+        }
+    }
+    return node_log; 
 }
 fn parse_import_section(new_module: &mut ModuleBuilder, import_section: &ImportSection, type_section: &TypeSection) -> usize {
     let type_list = type_section.types();
@@ -988,12 +1019,13 @@ fn parse_export_section(export_section: &ExportSection, lazy_nodes: &HashSet<Nod
     }
     return out_list;
 }
-fn push_export_candidates(candidates: &HashSet<Node>, exported_nodes: &HashSet<Node>, func_name_map: &NameMap, match_func_id: &HashMap<u32,u32>)
+fn push_export_candidates(candidates: &HashSet<Node>, exported_nodes: &mut HashSet<Node>, func_name_map: &NameMap, match_func_id: &HashMap<u32,u32>)
                              -> Vec<parity_wasm::elements::ExportEntry> {
     let mut out_list: Vec<parity_wasm::elements::ExportEntry> = Vec::new();
     let mut counter = 0;
     let mut already_exported_mem = false;
     let mut already_exported_global: HashSet<u32> = HashSet::new();
+    let mut function_names_hash: HashMap<String, u32> = HashMap::new();
     for entry in candidates {
         if exported_nodes.contains(entry) {
             continue;
@@ -1003,9 +1035,21 @@ fn push_export_candidates(candidates: &HashSet<Node>, exported_nodes: &HashSet<N
             Node::Func(x) => {
                 let old_id = (*x).id();
                 let new_id = *match_func_id.get(&old_id).unwrap();
-                *exp_entry.field_mut() = func_name_map.get(old_id).unwrap().to_string();//String::from("Func_export");
+                let mut name = func_name_map.get(old_id).unwrap().to_string();
+                let mut count = 1;
+                if function_names_hash.contains_key(&name) {
+                    count = *function_names_hash.get(&name).unwrap();
+                    println!("Awkward! I saw this export name before: {} {}", name, count);
+                    function_names_hash.insert(name.clone(), count+1);
+                    name = name + "__" + &count.to_string();
+                }
+                else {
+                    function_names_hash.insert(name.clone(), count+1);
+                }
+                *exp_entry.field_mut() = name;
                 *exp_entry.internal_mut() = parity_wasm::elements::Internal::Function(new_id);
                 out_list.push(exp_entry.clone());
+                exported_nodes.insert(*entry);
             }
             Node::Mem(_x) => {  //no need to process memory, it will be cloned into main and lazy
                 // if already_exported_mem {
@@ -1060,7 +1104,7 @@ fn parse_data_section(data_sectoin: &DataSection, lazy_nodes: &HashSet<Node>, da
 
     let mut out_list: Vec<DataSegment> = Vec::new();
     let segments = data_sectoin.entries(); 
-
+if !is_lazy{
     for (idx, seg) in segments.iter().enumerate() { // is_lazy XNOR contains
         // if (!is_lazy && !lazy_nodes.contains(&Node::Mem(data_list[idx]))) || 
         //  (is_lazy && lazy_nodes.contains(&Node::Mem(data_list[idx]))) {
@@ -1074,6 +1118,7 @@ fn parse_data_section(data_sectoin: &DataSection, lazy_nodes: &HashSet<Node>, da
         out_list.push(seg.clone());     //just copy over the data segments
 
     }
+}
     return out_list;
 }
 fn parse_code_section(module: &Module,//code: &CodeSection, type_section: &TypeSection, function_section: &FunctionSection,
