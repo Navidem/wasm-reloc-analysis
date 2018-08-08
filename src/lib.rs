@@ -637,12 +637,17 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
     if !is_lazy {   //add lazy_roots
         // imported_func_count = push_import_candidates_to_module(&module, &mut new_module, &lazy_nodes, func_name_map, imported_func_count, "lazy", &mut import_func_map);
     }
-    else {  // add nodes from main.wasm and main.memory
+    else {  // add nodes from main.wasm and main.memory, main.stack
 
         let external = parity_wasm::elements::External::Memory(parity_wasm::elements::MemoryType::new(min_mem_size, None) );
-        let import_entry = parity_wasm::elements::ImportEntry::new(String::from("main"), String::from("memory"), external);
-        new_module.push_import(import_entry);
+        let import_mem = parity_wasm::elements::ImportEntry::new(String::from("main"), String::from("memory"), external);
+        new_module.push_import(import_mem);
 
+        let external = parity_wasm::elements::External::Global(
+            parity_wasm::elements::GlobalType::new(parity_wasm::elements::ValueType::I32, true)
+        );
+        let import_stack = parity_wasm::elements::ImportEntry::new(String::from("main"), String::from("stack"), external);
+        new_module.push_import(import_stack);
         imported_func_count = push_import_candidates_to_module(&module, &mut new_module, &export_candidates, func_name_map, imported_func_count, "main", &mut import_func_map);
     }
 
@@ -673,8 +678,9 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
         let callback_exp_entry = parity_wasm::elements::ExportEntry::new(String::from("run_load_callback"), parity_wasm::elements::Internal::Function(new_callback_id));   
         let mem_exp_entry = parity_wasm::elements::ExportEntry::new(String::from("memory"), parity_wasm::elements::Internal::Memory(0)); 
         let tbl_exp_entry = parity_wasm::elements::ExportEntry::new(String::from("table"), parity_wasm::elements::Internal::Table(0)); 
+        let stck_exp_entry = parity_wasm::elements::ExportEntry::new(String::from("stack"), parity_wasm::elements::Internal::Global(0));
         //^^ better to be logged in exported_nodes as well
-        export_entries.extend(vec![run_exp_entry, callback_exp_entry, mem_exp_entry, tbl_exp_entry]);     
+        export_entries.extend(vec![run_exp_entry, callback_exp_entry, mem_exp_entry, tbl_exp_entry, stck_exp_entry]);     
     }
     else {  //export lazy nodes
         export_entries.extend(push_export_candidates(lazy_nodes, &mut exported_nodes, func_name_map, &match_func_id));
@@ -684,11 +690,13 @@ fn build_wasm(module: &Module, lazy_nodes: &HashSet<Node>, export_candidates: &m
     }
 
 //global
-    //add stack poinrter as global
-    let global_stack = parity_wasm::elements::GlobalEntry::new(
-        parity_wasm::elements::GlobalType::new(parity_wasm::elements::ValueType::I32, true), 
-        parity_wasm::elements::InitExpr::new(vec![Instruction::I32Const(STACK_ADDR), Instruction::End]));
-    new_module = new_module.with_global(global_stack);
+    //add stack poinrter as global for main.wasm
+    if !is_lazy{
+        let global_stack = parity_wasm::elements::GlobalEntry::new(
+            parity_wasm::elements::GlobalType::new(parity_wasm::elements::ValueType::I32, true), 
+            parity_wasm::elements::InitExpr::new(vec![Instruction::I32Const(STACK_ADDR), Instruction::End]));
+        new_module = new_module.with_global(global_stack);
+    }
     match module.global_section() {
         Some(global_section) => {
             for glob in global_section.entries() {
