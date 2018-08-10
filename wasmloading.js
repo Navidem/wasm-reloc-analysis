@@ -18,7 +18,11 @@ async function load (url_addr, url_len , callback) {
     let instance = await fetchAndInstantiate(url, {main: window.main.exports, env: {load, symbol, console_log_u32: res => console.log("Lazy foo Result: " + res),
         console_log_f64: res => console.log("Lazy bar Result: " + res)}});
     window.lazyInstance = instance;
-    window.main.exports.run_load_callback(callback);
+    // try{
+        window.main.exports.run_load_callback(callback);
+    // } catch(err) {
+    //     console.log(err.stack)
+    // }
 
 }
 
